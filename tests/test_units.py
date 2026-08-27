@@ -245,11 +245,24 @@ def _result() -> FileResult:
     return result
 
 
-def test_output_paths_replace_the_extension():
+def test_outputs_are_sorted_by_type_and_keep_the_input_structure():
     paths = output_paths(Path("/out"), "Ex 13/scan.pdf")
+    assert paths["pdf"] == Path("/out/pdf/Ex 13/scan.pdf")
+    assert paths["txt"] == Path("/out/txt/Ex 13/scan.txt")
+    assert paths["json"] == Path("/out/json/Ex 13/scan.json")
+
+
+def test_outputs_can_be_kept_together_instead():
+    paths = output_paths(Path("/out"), "Ex 13/scan.pdf", grouped=False)
+    assert paths["pdf"] == Path("/out/Ex 13/scan.pdf")
     assert paths["txt"] == Path("/out/Ex 13/scan.txt")
     assert paths["json"] == Path("/out/Ex 13/scan.json")
-    assert paths["pdf"] == Path("/out/Ex 13/scan.pdf")
+
+
+def test_an_extension_is_replaced_not_appended():
+    # `13.pdf` must become `13.txt`, never `13.pdf.txt`.
+    assert output_paths(Path("/out"), "13.pdf")["txt"].name == "13.txt"
+    assert output_paths(Path("/out"), "photo.jpeg")["pdf"].name == "photo.pdf"
 
 
 def test_text_output_marks_each_page_and_its_source(tmp_path: Path):

@@ -1,12 +1,20 @@
 """Write the results out: searchable PDF, plain text, JSON, and a CSV report.
 
-The output folder mirrors the input folder exactly — same subdirectories, same
-base names — so a folder of 60 exhibits comes back as a folder of 60 exhibits
-you can hand to someone without explaining the layout.
+Each kind of output gets its own folder, and the input's subfolder structure is
+repeated inside each one. That way the searchable PDFs are a complete set on
+their own — a folder you can hand to someone without explaining what the other
+files are for — and the same is true of the text.
 
-  input/Ex 13/13.pdf  ->  output/Ex 13/13.pdf     searchable copy
-                          output/Ex 13/13.txt     the text, page by page
-                          output/Ex 13/13.json    text + confidence + word boxes
+  input/Ex 13/13.pdf  ->  output/pdf/Ex 13/13.pdf     searchable copy
+                          output/txt/Ex 13/13.txt     the text, page by page
+                          output/json/Ex 13/13.json   text + confidence + word boxes
+
+With `outputs_grouped_by_type` off, a document's three files sit beside each
+other instead, in one tree that mirrors the input:
+
+  input/Ex 13/13.pdf  ->  output/Ex 13/13.pdf
+                          output/Ex 13/13.txt
+                          output/Ex 13/13.json
 """
 
 from __future__ import annotations
@@ -33,16 +41,21 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def output_paths(output_root: Path, relpath: str) -> dict[str, Path]:
-    """Where this document's three outputs go. Extensions are replaced, not
-    appended, so `13.pdf` becomes `13.txt` rather than `13.pdf.txt`."""
+def output_paths(output_root: Path, relpath: str, *, grouped: bool = True) -> dict[str, Path]:
+    """Where this document's three outputs go.
+
+    Extensions are replaced, not appended, so `13.pdf` becomes `13.txt` rather
+    than `13.pdf.txt`.
+    """
     rel = Path(relpath)
+    kinds = ("pdf", "txt", "json")
+    if grouped:
+        return {
+            kind: (output_root / kind / rel.parent / rel.stem).with_suffix(f".{kind}")
+            for kind in kinds
+        }
     stem_path = output_root / rel.parent / rel.stem
-    return {
-        "pdf": stem_path.with_suffix(".pdf"),
-        "txt": stem_path.with_suffix(".txt"),
-        "json": stem_path.with_suffix(".json"),
-    }
+    return {kind: stem_path.with_suffix(f".{kind}") for kind in kinds}
 
 
 def write_text(dest: Path, result: FileResult) -> None:

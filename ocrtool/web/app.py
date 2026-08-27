@@ -248,6 +248,7 @@ def api_start_run() -> Any:
         include_word_boxes=bool(payload.get("include_word_boxes", True)),
         write_previews=bool(payload.get("write_previews", True)),
         pdf_keeps_source_image=bool(payload.get("pdf_keeps_source_image", True)),
+        outputs_grouped_by_type=bool(payload.get("outputs_grouped_by_type", True)),
         min_confidence=float(payload.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
         recursive=bool(payload.get("recursive", True)),
     )

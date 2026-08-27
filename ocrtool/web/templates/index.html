@@ -66,10 +66,11 @@
   <label for="output-dir">Output folder — created if it does not exist</label>
   <input type="text" id="output-dir" class="mono" spellcheck="false" value="{{ defaults.output }}">
   <p class="dim mt" style="font-size:13px; margin-bottom:0">
-    For every document, three files land in the same folder layout as the input:
-    <span class="mono">.pdf</span> (the same pages, now searchable),
-    <span class="mono">.txt</span> (the text), and
-    <span class="mono">.json</span> (text, confidence, and word positions).
+    Every document produces three files — <span class="mono">.pdf</span> (the same pages,
+    now searchable), <span class="mono">.txt</span> (the text), and
+    <span class="mono">.json</span> (text, confidence, and word positions) — sorted into
+    <span class="mono">pdf/</span>, <span class="mono">txt/</span> and <span class="mono">json/</span>,
+    each keeping your subfolder names inside it.
     Page pictures go in <span class="mono">_previews/</span>, and each run's report and
     <span class="mono">pages.csv</span> go in <span class="mono">_runs/</span>.
   </p>
@@ -122,6 +123,9 @@
           <span>Write .txt files</span></label>
         <label class="toggle"><input type="checkbox" id="write-json" checked>
           <span>Write .json files <span class="note">— with word positions</span></span></label>
+        <label class="toggle"><input type="checkbox" id="group-outputs" checked>
+          <span>Sort outputs into <span class="mono">pdf/</span> <span class="mono">txt/</span> <span class="mono">json/</span>
+          <span class="note">— uncheck to keep each document's files together</span></span></label>
         <label class="toggle"><input type="checkbox" id="pdf-source-image" checked>
           <span>Keep the page as it looks in the PDF <span class="note">— colour and all; uncheck for smaller files</span></span></label>
         <label class="toggle"><input type="checkbox" id="write-previews" checked>

@@ -41,13 +41,13 @@ def test_a_whole_folder_becomes_a_folder_of_results(sample_folder: Path, tmp_pat
     assert run.totals.pages_done == 3
     assert run.totals.pages_failed == 0
 
-    # The output folder mirrors the input folder.
-    assert (out / "scan.pdf").is_file()
-    assert (out / "scan.txt").is_file()
-    assert (out / "scan.json").is_file()
-    assert (out / "sub" / "page.txt").is_file()
+    # Each kind of output has its own folder, with the input structure inside.
+    assert (out / "pdf" / "scan.pdf").is_file()
+    assert (out / "txt" / "scan.txt").is_file()
+    assert (out / "json" / "scan.json").is_file()
+    assert (out / "txt" / "sub" / "page.txt").is_file()
 
-    text = (out / "scan.txt").read_text()
+    text = (out / "txt" / "scan.txt").read_text()
     assert "MARTINEZ" in text
     assert "----- page 2 (ocr) -----" in text
 
@@ -63,7 +63,7 @@ def test_a_whole_folder_becomes_a_folder_of_results(sample_folder: Path, tmp_pat
 @needs_tesseract
 def test_the_pdf_copy_is_actually_searchable(sample_folder: Path, tmp_path: Path):
     run_blocking(_settings(sample_folder, tmp_path))
-    pdf = pdfium.PdfDocument(str(tmp_path / "output" / "scan.pdf"))
+    pdf = pdfium.PdfDocument(str(tmp_path / "output" / "pdf" / "scan.pdf"))
     try:
         assert len(pdf) == 2
         page = pdf[0]
@@ -87,7 +87,7 @@ def test_the_searchable_pdf_keeps_the_page_in_colour(tmp_path: Path):
 
     run_blocking(Settings(input_dir=str(folder), output_dir=str(tmp_path / "out"), dpi=150, workers=1))
 
-    pdf = pdfium.PdfDocument(str(tmp_path / "out" / "exhibit.pdf"))
+    pdf = pdfium.PdfDocument(str(tmp_path / "out" / "pdf" / "exhibit.pdf"))
     try:
         page = pdf[0]
         textpage = page.get_textpage()
@@ -113,7 +113,7 @@ def test_the_cleaned_image_can_be_kept_instead(tmp_path: Path):
         dpi=150, workers=1, pdf_keeps_source_image=False,
     ))
 
-    pdf = pdfium.PdfDocument(str(tmp_path / "out" / "exhibit.pdf"))
+    pdf = pdfium.PdfDocument(str(tmp_path / "out" / "pdf" / "exhibit.pdf"))
     try:
         page = pdf[0]
         rendered = page.render(scale=0.4).to_pil()
@@ -136,7 +136,7 @@ def test_the_invisible_text_still_lines_up_after_deskewing(tmp_path: Path):
 
     run_blocking(Settings(input_dir=str(folder), output_dir=str(tmp_path / "out"), dpi=150, workers=1))
 
-    pdf = pdfium.PdfDocument(str(tmp_path / "out" / "skewed.pdf"))
+    pdf = pdfium.PdfDocument(str(tmp_path / "out" / "pdf" / "skewed.pdf"))
     try:
         page = pdf[0]
         textpage = page.get_textpage()
@@ -181,13 +181,15 @@ def test_a_pdf_that_already_has_text_is_not_ocred_again(sample_folder: Path, tmp
 
     second_input = tmp_path / "second-input"
     second_input.mkdir()
-    (second_input / "already-searchable.pdf").write_bytes((tmp_path / "output" / "scan.pdf").read_bytes())
+    (second_input / "already-searchable.pdf").write_bytes(
+        (tmp_path / "output" / "pdf" / "scan.pdf").read_bytes()
+    )
 
     second = run_blocking(
         Settings(input_dir=str(second_input), output_dir=str(tmp_path / "output2"), dpi=150, workers=2)
     )
     assert second.totals.pages_text_layer >= 1
-    assert "MARTINEZ" in (tmp_path / "output2" / "already-searchable.txt").read_text()
+    assert "MARTINEZ" in (tmp_path / "output2" / "txt" / "already-searchable.txt").read_text()
 
 
 @needs_tesseract
@@ -195,7 +197,9 @@ def test_force_ocr_ignores_a_text_layer(sample_folder: Path, tmp_path: Path):
     run_blocking(_settings(sample_folder, tmp_path))
     second_input = tmp_path / "second-input"
     second_input.mkdir()
-    (second_input / "already-searchable.pdf").write_bytes((tmp_path / "output" / "scan.pdf").read_bytes())
+    (second_input / "already-searchable.pdf").write_bytes(
+        (tmp_path / "output" / "pdf" / "scan.pdf").read_bytes()
+    )
 
     forced = run_blocking(
         Settings(
@@ -226,8 +230,8 @@ def test_switching_the_deliverables_off_still_leaves_a_readable_run(sample_folde
         _settings(sample_folder, tmp_path, write_pdf=False, write_txt=False, write_json=False)
     )
     out = tmp_path / "output"
-    assert not (out / "scan.pdf").exists()
-    assert not (out / "scan.txt").exists()
+    assert not (out / "pdf").exists()
+    assert not (out / "txt").exists()
 
     # The viewer reads the run's own copy, which is written regardless.
     document = load_document(out, run.run_id, 0)
@@ -279,6 +283,16 @@ def test_a_cancelled_run_skips_its_remaining_pages(sample_folder: Path, tmp_path
     result: PageResult = run._page_task(work)
     assert result.source == "skipped"
     assert run.totals.pages_done == 0
+
+
+@needs_tesseract
+def test_outputs_can_be_kept_beside_each_other(sample_folder: Path, tmp_path: Path):
+    run_blocking(_settings(sample_folder, tmp_path, outputs_grouped_by_type=False))
+    out = tmp_path / "output"
+    assert (out / "scan.pdf").is_file()
+    assert (out / "scan.txt").is_file()
+    assert (out / "sub" / "page.json").is_file()
+    assert not (out / "pdf").exists()
 
 
 def test_a_run_over_an_empty_folder_finishes_and_says_so(tmp_path: Path):

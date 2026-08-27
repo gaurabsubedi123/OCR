@@ -9,15 +9,16 @@ It does OCR and nothing else. It does not extract fields, summarise, classify,
 or call a model over your documents.
 
 ```
-  input/                          output/
-    Ex 13/                          Ex 13/
-      exhibit-01.pdf   ──────▶        exhibit-01.pdf     same pages, now searchable
-      exhibit-02.pdf                  exhibit-01.txt     the text, page by page
-    Ex 25 photos/                     exhibit-01.json    text + confidence + word positions
-      IMG_4001.jpg                  Ex 25 photos/
-                                      IMG_4001.txt
-                                    _previews/           a picture of every page
-                                    _runs/               what happened, and pages.csv
+  input/                        output/
+    Ex 13/                        pdf/                  same pages, now searchable
+      exhibit-01.pdf   ─────▶       Ex 13/exhibit-01.pdf
+      exhibit-02.pdf                Ex 25 photos/IMG_4001.pdf
+    Ex 25 photos/                 txt/                  the text, page by page
+      IMG_4001.jpg                  Ex 13/exhibit-01.txt
+                                  json/                 text + confidence + word positions
+                                    Ex 13/exhibit-01.json
+                                  _previews/            a picture of every page
+                                  _runs/                what happened, and pages.csv
 ```
 
 ---
@@ -40,13 +41,15 @@ or call a model over your documents.
 
 ## What you get
 
-For every document, in a folder tree that mirrors your input exactly:
+Each kind of output gets its own folder, and your subfolder names are repeated
+inside each one — so `pdf/` is a complete set of searchable documents you can
+hand to someone without explaining what the rest is for, and so is `txt/`:
 
 | File | What it is |
 | --- | --- |
-| `name.pdf` | The same pages, now with selectable, searchable text behind the page image — open it in any PDF reader and Ctrl-F works. The page still looks like your original, in colour; pages that already had a text layer are copied through untouched. |
-| `name.txt` | Plain text, with a `----- page 3 (ocr) -----` marker before each page saying where that page's text came from. |
-| `name.json` | Per page: the text, tesseract's confidence, whether it was flagged, and every word with its position on the page image. |
+| `pdf/…/name.pdf` | The same pages, now with selectable, searchable text behind the page image — open it in any PDF reader and Ctrl-F works. The page still looks like your original, in colour; pages that already had a text layer are copied through untouched. |
+| `txt/…/name.txt` | Plain text, with a `----- page 3 (ocr) -----` marker before each page saying where that page's text came from. |
+| `json/…/name.json` | Per page: the text, tesseract's confidence, whether it was flagged, and every word with its position on the page image. |
 
 And for the run as a whole:
 
@@ -56,6 +59,9 @@ And for the run as a whole:
 | `_runs/<run-id>/pages.csv` | One row per page: source, confidence, characters, seconds, and why it was flagged. Sort by confidence to find what to check first. |
 | `_runs/<run-id>/manifest.json` | The full record of the run: settings, timings, per-file results. |
 | `_runs/<run-id>/events.jsonl` | What happened, in order, as it happened. |
+
+`--outputs-together` (or unticking the box in the browser) puts each document's
+three files beside each other instead, in a single tree mirroring your input.
 
 Nothing in the output folder is required by anything else — the PDFs and text
 files stand alone, and you can delete `_runs/` and `_previews/` once you have
@@ -275,6 +281,7 @@ folder is the record, and the UI reads it back.
 | Write .txt files | `--no-txt` to disable | on | |
 | Write .json files | `--no-json` to disable | on | |
 | Save page pictures | `--no-previews` to disable | on | The browser viewer needs these. |
+| Sort outputs into `pdf/` `txt/` `json/` | `--outputs-together` to disable | on | Disabling puts a document's three files beside each other in one tree that mirrors your input. |
 | Keep the page as it looks in the PDF | `--pdf-cleaned-image` to disable | on | Puts your original page picture into the searchable PDF instead of the greyscale copy OCR read. Disabling makes smaller files. |
 | Page segmentation mode | `--psm` | 3 | 3 automatic, 4 single column, 6 one block, 11/12 sparse text. |
 

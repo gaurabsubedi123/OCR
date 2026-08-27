@@ -417,7 +417,7 @@ class Run:
 
     def _write_outputs(self, index: int, result: FileResult) -> None:
         out_root = self.settings.output_path
-        paths = output_paths(out_root, result.relpath)
+        paths = output_paths(out_root, result.relpath, grouped=self.settings.outputs_grouped_by_type)
         written: dict[str, str] = {}
 
         if self.settings.write_txt:

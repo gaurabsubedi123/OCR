@@ -101,6 +101,10 @@ class Settings:
     write_json: bool = True
     include_word_boxes: bool = True
     write_previews: bool = True
+    # Put each kind of output in its own folder — output/pdf/, output/txt/,
+    # output/json/ — each keeping the input's subfolder structure inside it.
+    # Off puts a document's three files beside each other instead.
+    outputs_grouped_by_type: bool = True
     # Put the original page picture back into the searchable PDF instead of the
     # greyscale copy OCR read. Truer to the document, and a larger file.
     pdf_keeps_source_image: bool = True

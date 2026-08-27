@@ -40,6 +40,11 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("--no-json", action="store_true", help="skip the .json files")
     run_cmd.add_argument("--no-previews", action="store_true", help="skip page images (the UI needs these)")
     run_cmd.add_argument(
+        "--outputs-together",
+        action="store_true",
+        help="put a document's pdf, txt and json beside each other instead of in pdf/ txt/ json/",
+    )
+    run_cmd.add_argument(
         "--pdf-cleaned-image",
         action="store_true",
         help="put the greyscale image OCR read into the PDF instead of the original page (smaller files)",
@@ -86,6 +91,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         write_json=not args.no_json,
         write_previews=not args.no_previews,
         pdf_keeps_source_image=not args.pdf_cleaned_image,
+        outputs_grouped_by_type=not args.outputs_together,
         min_confidence=args.min_confidence,
         recursive=not args.no_recursive,
     )

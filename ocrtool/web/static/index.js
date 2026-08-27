@@ -205,6 +205,7 @@ $('#start').addEventListener('click', async () => {
       write_json: $('#write-json').checked,
       write_previews: $('#write-previews').checked,
       pdf_keeps_source_image: $('#pdf-source-image').checked,
+      outputs_grouped_by_type: $('#group-outputs').checked,
     });
     window.location.href = url;
   } catch (err) {
