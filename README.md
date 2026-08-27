@@ -413,18 +413,24 @@ comes from throughput actually measured during the run.
 
 ## How fast it is
 
-Measured on this machine (8 workers, 300 dpi, letter-size pages):
+Measured on one machine (8 cores, 8 workers, 300 dpi, letter-size pages):
 
-- **~4.5 pages per second** on clean typed pages — a 52-page folder in 11
+- **~3.7 pages per second** on clean typed pages — a 52-page folder in 14
   seconds.
+- **A real exhibit set: 1,944 pages across 61 documents in 15 minutes 38
+  seconds**, about 2.1 pages per second. Scanned court filings, medical bills
+  and deposition transcripts. 14% of pages were flagged for review; none
+  failed. Budget roughly **8 minutes per 1,000 pages** of real scans, and
+  expect a bad batch of faxes to be slower.
 - **Pages with a usable text layer are effectively free**: they are read, not
   recognised.
-- **Real scans are slower than clean test pages.** On a real 2,063-page legal
-  case file, tesseract on photocopied and faxed medical records ran closer to
-  1–2 seconds per page per worker. Budget roughly **10–20 minutes per 1,000
-  pages** on 8 workers, and expect a bad batch of faxes to be worse.
+- **Running it again over an unchanged folder takes seconds**, because nothing
+  is read twice.
 
-The first minute of any run replaces every estimate with a measured one.
+Keeping your original page image in the searchable PDF costs about 20% (that
+52-page folder is 11 seconds with `--pdf-cleaned-image`, 14 with it on). Every
+estimate shown during a run is replaced by a measured one within the first
+minute.
 
 ---
 
@@ -488,7 +494,7 @@ Stated plainly, because each of these is a thing OCR tools are assumed to do:
 ## Development
 
 ```bash
-.venv/bin/python -m pytest -q          # 51 tests, about 15 seconds
+.venv/bin/python -m pytest -q          # 76 tests, about 30 seconds
 ```
 
 Tests that need the tesseract binary skip themselves when it is absent. No test
