@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run_id }} — ocrtool{% endblock %}
+{% block wrapclass %}wide{% endblock %}
+{% block topbar %}<span class="dim mono" style="font-size:13px">run {{ run_id }}</span>{% endblock %}
+{% block topmeta %}<span id="top-status"></span>{% endblock %}
+
+{% block content %}
+<div id="head">
+  <h1 id="title">Reading…</h1>
+  <p class="lede" id="paths"></p>
+</div>
+
+<div class="stats mb" id="stats"></div>
+
+<div class="card tight">
+  <div class="bar" id="bar"><i style="width:0%"></i></div>
+  <div class="bar-caption">
+    <span id="bar-left">starting…</span>
+    <span id="bar-right"></span>
+  </div>
+  <div class="inflight" id="inflight"></div>
+  <div class="row mt">
+    <div id="run-note" class="soft" style="font-size:13.5px"></div>
+    <div class="shrink">
+      <button id="stop" class="danger small">Stop</button>
+      <a class="button small" id="csv-link" href="#">Download pages.csv</a>
+      <a class="button small" href="/">New run</a>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Search everything this run has read</h2>
+    <span class="hint">searches text as soon as a page is done</span>
+  </div>
+  <input type="text" id="search" placeholder="a name, a date, a case number…" spellcheck="false">
+  <div id="hits" class="hitlist mt"></div>
+</div>
+
+<div class="grid two">
+  <div class="card">
+    <div class="card-head"><h2>Documents</h2><span class="hint" id="files-hint"></span></div>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>file</th><th>status</th><th class="num">pages</th>
+          <th class="num">flagged</th><th class="num">conf</th><th>output</th>
+        </tr></thead>
+        <tbody id="files"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Page by page</h2><span class="hint">newest first</span></div>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script id="bootstrap" type="application/json">{{ {'run_id': run_id} | tojson }}</script>
+{% endblock %}
+
+{% block scripts %}<script src="{{ url_for('static', filename='run.js') }}"></script>{% endblock %}

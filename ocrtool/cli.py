@@ -1,0 +1,234 @@
+"""Command line: `ocrtool run`, `ocrtool ui`, `ocrtool doctor`.
+
+argparse rather than a CLI framework — one fewer dependency, and this is three
+commands, not thirty.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+from . import __version__
+from .config import DEFAULT_DPI, DEFAULT_MIN_CONFIDENCE, DEFAULT_PSM, Settings, default_workers
+from .runner import Run, run_blocking
+from .tesseract import installed_languages, tesseract_path, tesseract_version
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="ocrtool",
+        description="OCR every document in a folder, on this machine, with nothing sent anywhere.",
+    )
+    parser.add_argument("--version", action="version", version=f"ocrtool {__version__}")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    run_cmd = sub.add_parser("run", help="OCR a folder from the command line")
+    run_cmd.add_argument("input", help="folder of documents to read")
+    run_cmd.add_argument("-o", "--output", required=True, help="folder to write results into")
+    run_cmd.add_argument("--dpi", type=int, default=DEFAULT_DPI, help=f"render resolution (default {DEFAULT_DPI})")
+    run_cmd.add_argument("--lang", default="eng", help="tesseract language code (default eng)")
+    run_cmd.add_argument("--psm", type=int, default=DEFAULT_PSM, help=f"page segmentation mode (default {DEFAULT_PSM})")
+    run_cmd.add_argument("--workers", type=int, default=0, help=f"parallel pages (default {default_workers()} here)")
+    run_cmd.add_argument("--force-ocr", action="store_true", help="OCR every page, even one with a text layer")
+    run_cmd.add_argument("--no-deskew", action="store_true", help="do not straighten skewed scans")
+    run_cmd.add_argument("--no-denoise", action="store_true", help="do not despeckle scans")
+    run_cmd.add_argument("--no-pdf", action="store_true", help="skip the searchable PDF copies")
+    run_cmd.add_argument("--no-txt", action="store_true", help="skip the .txt files")
+    run_cmd.add_argument("--no-json", action="store_true", help="skip the .json files")
+    run_cmd.add_argument("--no-previews", action="store_true", help="skip page images (the UI needs these)")
+    run_cmd.add_argument("--no-recursive", action="store_true", help="only the top level of the folder")
+    run_cmd.add_argument(
+        "--min-confidence",
+        type=float,
+        default=DEFAULT_MIN_CONFIDENCE,
+        help=f"flag pages below this OCR confidence (default {DEFAULT_MIN_CONFIDENCE:.0f})",
+    )
+    run_cmd.add_argument("--quiet", action="store_true", help="only print the summary")
+
+    ui_cmd = sub.add_parser("ui", help="start the local web interface")
+    ui_cmd.add_argument("--host", default="127.0.0.1", help="default 127.0.0.1 — this machine only")
+    ui_cmd.add_argument("--port", type=int, default=5000)
+    ui_cmd.add_argument("--output", default=None, help="default output folder to offer in the form")
+    ui_cmd.add_argument("--input", default=None, help="default input folder to offer in the form")
+    ui_cmd.add_argument("--debug", action="store_true")
+
+    sub.add_parser("doctor", help="check that everything this tool needs is present")
+
+    args = parser.parse_args(argv)
+    if args.command == "run":
+        return _cmd_run(args)
+    if args.command == "ui":
+        return _cmd_ui(args)
+    return _cmd_doctor()
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    settings = Settings(
+        input_dir=args.input,
+        output_dir=args.output,
+        dpi=args.dpi,
+        lang=args.lang,
+        psm=args.psm,
+        workers=args.workers,
+        force_ocr=args.force_ocr,
+        deskew=not args.no_deskew,
+        denoise=not args.no_denoise,
+        write_pdf=not args.no_pdf,
+        write_txt=not args.no_txt,
+        write_json=not args.no_json,
+        write_previews=not args.no_previews,
+        min_confidence=args.min_confidence,
+        recursive=not args.no_recursive,
+    )
+
+    if not settings.input_path.is_dir():
+        print(f"not a folder: {settings.input_path}", file=sys.stderr)
+        return 2
+    if tesseract_path() is None:
+        print("tesseract was not found — run `ocrtool doctor`.", file=sys.stderr)
+        return 2
+
+    print(f"Reading  {settings.input_path}")
+    print(f"Writing  {settings.output_path}")
+    print(f"Workers  {settings.workers}   dpi {settings.dpi}   lang {settings.lang}\n")
+
+    state = {"line": "", "printed_at": 0.0}
+
+    def on_event(event: dict) -> None:
+        kind = event.get("type")
+        if kind == "phase" and not args.quiet:
+            _clear(state)
+            print(event.get("message", ""))
+        elif kind == "file" and not args.quiet:
+            summary = event["summary"]
+            if summary["status"] in {"done", "failed", "cancelled"}:
+                _clear(state)
+                flagged = len(summary["flagged_pages"])
+                note = f", {flagged} flagged" if flagged else ""
+                err = f"  {summary['error']}" if summary.get("error") else ""
+                print(
+                    f"  {summary['status']:9} {summary['relpath']}  "
+                    f"({summary['pages_done']} pages{note}){err}"
+                )
+        elif kind == "progress" and not args.quiet:
+            run = event["run"]
+            totals = run["totals"]
+            eta = run.get("eta_s")
+            eta_text = f"  eta {_duration(eta)}" if eta else ""
+            line = (
+                f"  {totals['pages_done']}/{totals['pages_total']} pages  "
+                f"{totals['files_done']}/{totals['files_total']} files  "
+                f"{run['pages_per_second']:.2f} pages/s{eta_text}"
+            )
+            _status(state, line)
+        elif kind == "done":
+            _clear(state)
+
+    run = run_blocking(settings, on_event=on_event)
+    return _report(run)
+
+
+def _report(run: Run) -> int:
+    totals = run.totals
+    print()
+    print(f"Status    {run.status}")
+    print(f"Files     {totals.files_done} written, {totals.files_failed} failed of {totals.files_total}")
+    print(
+        f"Pages     {totals.pages_done} read "
+        f"({totals.pages_text_layer} from text layers, {totals.pages_ocr} OCR'd, {totals.pages_failed} failed)"
+    )
+    print(f"Flagged   {totals.pages_flagged} pages need a look")
+    print(f"Time      {_duration(run.elapsed_s)}")
+    print(f"Output    {run.settings.output_path}")
+    print(f"Report    {run.run_dir / 'pages.csv'}")
+    if run.error:
+        print(f"Error     {run.error}", file=sys.stderr)
+    return 0 if run.status == "done" else 1
+
+
+def _cmd_ui(args: argparse.Namespace) -> int:
+    from .web.app import create_app
+
+    app = create_app(default_input=args.input, default_output=args.output)
+    url = f"http://{args.host}:{args.port}"
+    print(f"ocrtool {__version__}")
+    print(f"tesseract: {tesseract_version() or 'NOT FOUND — run `ocrtool doctor`'}")
+    print(f"\n  Open {url}\n")
+    print("Ctrl-C to stop.")
+    app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
+    return 0
+
+
+def _cmd_doctor() -> int:
+    ok = True
+    print(f"ocrtool     {__version__}")
+    print(f"python      {sys.version.split()[0]}")
+
+    binary = tesseract_path()
+    if binary:
+        print(f"tesseract   {tesseract_version()}\n            {binary}")
+        langs = installed_languages()
+        print(f"languages   {', '.join(langs) if langs else 'none found'}")
+        if "eng" not in langs:
+            print("            ! English data is missing — see README.md")
+            ok = False
+    else:
+        print("tesseract   NOT FOUND")
+        print("            Install it, or set OCRTOOL_TESSERACT to the binary path.")
+        ok = False
+
+    for module in ("pypdfium2", "PIL", "numpy", "flask"):
+        try:
+            __import__(module)
+            print(f"{module:11} ok")
+        except ImportError:
+            print(f"{module:11} MISSING — run: uv pip install -e .")
+            ok = False
+
+    print(f"workers     {default_workers()} by default on this machine")
+    print("\nready" if ok else "\nnot ready — fix the lines marked above")
+    return 0 if ok else 1
+
+
+def _status(state: dict, line: str) -> None:
+    """Rewrite one progress line in place — but only on a terminal.
+
+    Piped into a file or a log, carriage returns produce an unreadable smear of
+    half-overwritten lines, so there the progress is printed at intervals as
+    ordinary lines instead.
+    """
+    if sys.stdout.isatty():
+        sys.stdout.write("\r" + line.ljust(len(state["line"])))
+        sys.stdout.flush()
+        state["line"] = line
+        return
+
+    now = time.monotonic()
+    if now - state.get("printed_at", 0.0) >= 5.0:
+        print(line.strip())
+        state["printed_at"] = now
+
+
+def _clear(state: dict) -> None:
+    if state["line"] and sys.stdout.isatty():
+        sys.stdout.write("\r" + " " * len(state["line"]) + "\r")
+        sys.stdout.flush()
+        state["line"] = ""
+
+
+def _duration(seconds: float | None) -> str:
+    if not seconds:
+        return "0s"
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

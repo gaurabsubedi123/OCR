@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{% block title %}ocrtool — OCR a folder{% endblock %}
+{% block topmeta %}{{ tesseract or 'tesseract not found' }}{% endblock %}
+
+{% block content %}
+<h1>OCR a folder of documents</h1>
+<p class="lede">
+  Point this at a folder. It reads every PDF and image inside it — page by page, on this
+  machine, with nothing sent anywhere — and writes a searchable copy of each document,
+  its text, and a per-page report into an output folder you choose.
+</p>
+
+{% if not tesseract %}
+<div class="notice bad">
+  <strong>tesseract was not found.</strong> Nothing can be read until it is installed.
+  Run <span class="mono">ocrtool doctor</span> in a terminal, and see the “Installing tesseract”
+  section of README.md.
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head">
+    <h2><span class="step-label">1</span>Where are the documents?</h2>
+    <span class="hint">PDF, PNG, JPG, TIFF, BMP, WEBP, GIF</span>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="folder" type="button">Point at a folder</button>
+    <button class="tab" data-tab="upload" type="button">Upload files</button>
+  </div>
+
+  <div id="tab-folder">
+    <div class="row">
+      <div>
+        <label for="input-dir">Folder on this machine — read in place, nothing is copied</label>
+        <input type="text" id="input-dir" class="mono" spellcheck="false"
+               placeholder="{{ home }}/Documents/case-file" value="{{ defaults.input }}">
+      </div>
+      <div class="shrink"><button type="button" id="browse-toggle">Browse…</button></div>
+    </div>
+    <div id="browser" class="browser hidden"></div>
+    <div id="folder-report" class="mt"></div>
+  </div>
+
+  <div id="tab-upload" class="hidden">
+    <div class="dropzone" id="dropzone">
+      <p style="margin:0 0 12px"><strong>Drop files or a folder here</strong></p>
+      <button type="button" id="pick-files">Choose files</button>
+      <button type="button" id="pick-folder">Choose a folder</button>
+      <input type="file" id="file-input" multiple class="hidden">
+      <input type="file" id="folder-input" webkitdirectory directory multiple class="hidden">
+      <p class="dim" style="margin:12px 0 0; font-size:13px">
+        A browser can only hand over copies, so uploads are written into
+        <span class="mono">&lt;output&gt;/_uploads/</span> first. For a folder already on this
+        machine, the other tab is faster and uses no extra disk.
+      </p>
+    </div>
+    <div id="upload-report" class="mt"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2><span class="step-label">2</span>Where should the results go?</h2>
+  </div>
+  <label for="output-dir">Output folder — created if it does not exist</label>
+  <input type="text" id="output-dir" class="mono" spellcheck="false" value="{{ defaults.output }}">
+  <p class="dim mt" style="font-size:13px; margin-bottom:0">
+    For every document, three files land in the same folder layout as the input:
+    <span class="mono">.pdf</span> (the same pages, now searchable),
+    <span class="mono">.txt</span> (the text), and
+    <span class="mono">.json</span> (text, confidence, and word positions).
+    Page pictures go in <span class="mono">_previews/</span>, and each run's report and
+    <span class="mono">pages.csv</span> go in <span class="mono">_runs/</span>.
+  </p>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2><span class="step-label">3</span>How should it read them?</h2>
+    <span class="hint">the defaults are right for scanned paper</span>
+  </div>
+
+  <div class="grid four">
+    <div>
+      <label for="dpi">Resolution (dpi)</label>
+      <input type="number" id="dpi" value="{{ defaults.dpi }}" min="72" max="600" step="50">
+    </div>
+    <div>
+      <label for="lang">Language</label>
+      <select id="lang">
+        {% for code in languages %}<option value="{{ code }}" {% if code == 'eng' %}selected{% endif %}>{{ code }}</option>{% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="workers">Pages at once</label>
+      <input type="number" id="workers" value="{{ defaults.workers }}" min="1" max="32">
+    </div>
+    <div>
+      <label for="min-confidence">Flag pages below confidence</label>
+      <input type="number" id="min-confidence" value="{{ defaults.min_confidence }}" min="0" max="100" step="5">
+    </div>
+  </div>
+
+  <details class="mt">
+    <summary class="soft" style="cursor:pointer">More options</summary>
+    <div class="grid two mt">
+      <div>
+        <label class="toggle"><input type="checkbox" id="force-ocr">
+          <span>OCR every page <span class="note">— ignore text layers PDFs already carry</span></span></label>
+        <label class="toggle"><input type="checkbox" id="deskew" checked>
+          <span>Straighten skewed scans</span></label>
+        <label class="toggle"><input type="checkbox" id="denoise" checked>
+          <span>Remove scanner speckle</span></label>
+        <label class="toggle"><input type="checkbox" id="recursive" checked>
+          <span>Include subfolders</span></label>
+      </div>
+      <div>
+        <label class="toggle"><input type="checkbox" id="write-pdf" checked>
+          <span>Write searchable PDFs</span></label>
+        <label class="toggle"><input type="checkbox" id="write-txt" checked>
+          <span>Write .txt files</span></label>
+        <label class="toggle"><input type="checkbox" id="write-json" checked>
+          <span>Write .json files <span class="note">— with word positions</span></span></label>
+        <label class="toggle"><input type="checkbox" id="write-previews" checked>
+          <span>Save page pictures <span class="note">— needed to check a page against its source</span></span></label>
+        <div class="mt">
+          <label for="psm">Page segmentation mode</label>
+          <select id="psm">
+            <option value="3" selected>3 — automatic (default)</option>
+            <option value="4">4 — one column of text</option>
+            <option value="6">6 — one uniform block</option>
+            <option value="11">11 — sparse text, any order</option>
+            <option value="12">12 — sparse text with layout detection</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </details>
+</div>
+
+<div class="card tight">
+  <div class="row">
+    <div>
+      <div id="estimate" class="soft" style="font-size:13.5px">Choose a folder to see what will be read.</div>
+      <div id="start-error" class="notice bad hidden mt"></div>
+    </div>
+    <div class="shrink"><button class="primary" id="start" disabled>Start reading</button></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Earlier runs</h2><span class="hint">read back from each output folder</span></div>
+  <div id="recent"></div>
+</div>
+
+<script id="bootstrap" type="application/json">{{ {'recent': recent, 'home': home} | tojson }}</script>
+{% endblock %}
+
+{% block scripts %}<script src="{{ url_for('static', filename='index.js') }}"></script>{% endblock %}

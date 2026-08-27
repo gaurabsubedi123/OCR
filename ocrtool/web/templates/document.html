@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Document — ocrtool{% endblock %}
+{% block wrapclass %}wide{% endblock %}
+{% block topbar %}<a class="dim mono" style="font-size:13px" href="/runs/{{ run_id }}">← run {{ run_id }}</a>{% endblock %}
+{% block topmeta %}<span id="doc-meta"></span>{% endblock %}
+
+{% block content %}
+<h1 id="doc-title">Loading…</h1>
+<p class="lede" id="doc-summary"></p>
+
+<div class="card tight mb">
+  <div class="row">
+    <div>
+      <input type="text" id="find" placeholder="Find in this document…" spellcheck="false">
+    </div>
+    <div class="shrink" id="downloads"></div>
+  </div>
+  <div id="find-summary" class="soft mt" style="font-size:13px"></div>
+</div>
+
+<div class="viewer">
+  <div class="pagelist" id="pagelist"></div>
+  <div>
+    <div class="card tight mb" id="page-meta"></div>
+    <div class="page-view">
+      <div class="page-image" id="page-image"></div>
+      <div class="page-text" id="page-text"></div>
+    </div>
+  </div>
+</div>
+
+<script id="bootstrap" type="application/json">{{ {'run_id': run_id, 'index': index} | tojson }}</script>
+{% endblock %}
+
+{% block scripts %}<script src="{{ url_for('static', filename='document.js') }}"></script>{% endblock %}

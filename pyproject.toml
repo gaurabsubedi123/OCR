@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ocrtool"
+version = "1.0.0"
+description = "Local OCR for a folder of documents: point it at a folder, watch every page go by, get searchable copies out the other side."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# Deliberately small. Everything here is permissive-licensed and pip-installable;
+# the only non-Python requirement is the tesseract binary itself.
+#
+# pypdfium2 (Apache-2.0/BSD-3) does both PDF rendering and PDF assembly, so it
+# replaces what would otherwise be poppler + a PDF writer. PyMuPDF was not used:
+# it is AGPL-3.0, which is a poor fit for documents belonging to other people.
+dependencies = [
+    "pypdfium2>=4.30",
+    "pillow>=10.3",
+    "numpy>=1.26",
+    "Flask>=3.0,<4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+ocrtool = "ocrtool.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ocrtool"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

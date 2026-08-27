@@ -1,0 +1,18 @@
+# Your documents and anything OCR'd out of them. Never commit these.
+input/
+output/
+runs/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.webp
+*.bmp
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+uv.lock
