@@ -29,6 +29,9 @@ function renderStats(run) {
   const t = run.totals || {};
   const cards = [
     ['pages read', num(t.pages_done), `of ${num(t.pages_total)}`, ''],
+    ...(t.files_skipped
+      ? [['already done', num(t.files_skipped), `documents · ${num(t.pages_skipped)} pages`, '']]
+      : []),
     ['documents', num(t.files_done), `of ${num(t.files_total)}`, ''],
     ['from text layers', num(t.pages_text_layer), 'no OCR needed', ''],
     ['flagged', num(t.pages_flagged), 'worth a look', 'flagged'],
@@ -69,7 +72,9 @@ function fileRow(summary, index) {
     el('td', { class: 'path' }, summary.relpath,
       summary.error ? el('div', { class: 'dim', style: 'color:var(--bad)' }, summary.error) : null),
     el('td', {}, statusPill(summary.status)),
-    el('td', { class: 'num' }, `${num(seen)}/${num(summary.page_count)}`),
+    el('td', { class: 'num' }, summary.status === 'skipped'
+      ? el('span', { class: 'dim', title: `read by run ${summary.skipped_from_run}` }, num(summary.page_count))
+      : `${num(seen)}/${num(summary.page_count)}`),
     el('td', { class: 'num' }, flagged ? el('span', { class: 'pill warn' }, num(flagged)) : el('span', { class: 'dim' }, '—')),
     el('td', { class: 'num' }, summary.mean_confidence === null || summary.mean_confidence === undefined
       ? el('span', { class: 'dim' }, '—')
@@ -139,6 +144,9 @@ function renderNote(run) {
     return;
   }
   const parts = [`${num(t.pages_done)} pages from ${num(t.files_total)} documents in ${duration(run.elapsed_s)}.`];
+  if (t.files_skipped) {
+    parts.push(`${num(t.files_skipped)} documents were already read into this folder and were left alone.`);
+  }
   if (t.pages_flagged) parts.push(`${num(t.pages_flagged)} pages are flagged — open a document to see them.`);
   if (t.pages_failed) parts.push(`${num(t.pages_failed)} pages could not be read.`);
   parts.push(`Everything is in ${run.output_dir}`);

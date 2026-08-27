@@ -30,6 +30,7 @@ from typing import Any, Callable, Iterator
 from . import __version__
 from .config import Settings
 from .discover import find_documents
+from .ledger import Ledger, LedgerEntry, recipe
 from .models import FileResult, PageResult
 from .outputs import (
     now_iso,
@@ -57,7 +58,9 @@ class Totals:
     files_total: int = 0
     files_done: int = 0
     files_failed: int = 0
+    files_skipped: int = 0
     pages_total: int = 0
+    pages_skipped: int = 0
     pages_done: int = 0
     pages_ocr: int = 0
     pages_text_layer: int = 0
@@ -84,6 +87,7 @@ class Run:
 
         self.files: list[FileResult] = []
         self.totals = Totals()
+        self.ledger: Ledger | None = None
         self.discovery_errors: list[dict[str, str]] = []
 
         self._lock = threading.RLock()
@@ -208,6 +212,9 @@ class Run:
                 json.dumps(self.settings.to_dict(), indent=2), encoding="utf-8"
             )
 
+            if self.settings.skip_already_done:
+                self.ledger = Ledger(self.settings.output_path)
+
             self._set_status("discovering")
             self.publish({"type": "phase", "phase": "discovering", "message": f"Looking through {self.settings.input_path}"})
             self._discover()
@@ -241,28 +248,94 @@ class Run:
     def _discover(self) -> None:
         found = find_documents(self.settings.input_path, recursive=self.settings.recursive)
         with self._lock:
-            for item in found:
+            for index, item in enumerate(found):
                 result = FileResult(
                     relpath=item.relpath,
                     source_path=str(item.path),
                     size_bytes=item.size_bytes,
                     page_count=item.page_count,
+                    modified=item.modified,
                 )
                 if item.error:
                     result.status = "failed"
                     result.error = item.error
                     self.discovery_errors.append({"file": item.relpath, "error": item.error})
+                else:
+                    self._reuse_if_done(index, result)
                 self.files.append(result)
+
             self.totals.files_total = len(self.files)
-            self.totals.pages_total = sum(f.page_count for f in self.files)
             self.totals.files_failed = sum(1 for f in self.files if f.status == "failed")
+            self.totals.files_skipped = sum(1 for f in self.files if f.status == "skipped")
+            # Skipped pages are not counted in the denominator: the progress bar
+            # is about the work this run is doing, and counting pages nobody is
+            # reading would make it crawl toward a number it never reaches.
+            self.totals.pages_skipped = sum(
+                f.page_count for f in self.files if f.status == "skipped"
+            )
+            self.totals.pages_total = sum(
+                f.page_count for f in self.files if f.status not in {"skipped", "failed"}
+            )
+
+        if self.totals.files_skipped:
+            self.publish({
+                "type": "log",
+                "level": "info",
+                "message": (
+                    f"{self.totals.files_skipped} of {self.totals.files_total} documents "
+                    f"({self.totals.pages_skipped} pages) were already read into this folder "
+                    "and are being left alone."
+                ),
+            })
         self.publish({"type": "discovered", "files": [f.summary() for f in self.files]})
         self._publish_progress()
+
+    def _reuse_if_done(self, index: int, result: FileResult) -> None:
+        """Mark a document as already read, if this folder can prove it is."""
+        if self.ledger is None:
+            return
+        wanted = output_paths(
+            self.settings.output_path,
+            result.relpath,
+            grouped=self.settings.outputs_grouped_by_type,
+        )
+        wanted = {
+            kind: path
+            for kind, path in wanted.items()
+            if getattr(self.settings, f"write_{kind}")
+        }
+        entry = self.ledger.already_done(
+            result.relpath,
+            size=result.size_bytes,
+            mtime=result.modified,
+            settings=self.settings.to_dict(),
+            wanted=wanted,
+        )
+        if entry is None:
+            return
+
+        result.status = "skipped"
+        result.outputs = dict(entry.outputs)
+        result.skipped_from_run = entry.run_id
+        if entry.pages:
+            result.page_count = entry.pages
+
+        # The viewer opens a document through the run being looked at, so the
+        # earlier run's page text is copied across. Otherwise every skipped
+        # document would be an empty page in the results.
+        if entry.pages_json:
+            source = self.settings.output_path / entry.pages_json
+            destination = self.page_json_path(index)
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            except OSError as exc:
+                log.warning("could not carry over the previous result for %s: %s", result.relpath, exc)
 
     def _process_all(self) -> None:
         work_by_file: dict[int, list[PageWork]] = {}
         for index, result in enumerate(self.files):
-            if result.status == "failed" or result.page_count <= 0:
+            if result.status != "pending" or result.page_count <= 0:
                 continue
             work_by_file[index] = [
                 self._page_work(index, result, page_no)
@@ -405,6 +478,20 @@ class Run:
             self._write_run_copy(index, result)
         except OSError as exc:
             log.warning("could not write the run's copy of %s: %s", result.relpath, exc)
+
+        if result.status == "done" and self.ledger is not None:
+            self.ledger.record(
+                LedgerEntry(
+                    relpath=result.relpath,
+                    size=result.size_bytes,
+                    mtime=result.modified,
+                    pages=len(result.pages),
+                    outputs=dict(result.outputs),
+                    recipe=recipe(self.settings.to_dict()),
+                    run_id=self.run_id,
+                    pages_json=f"_runs/{self.run_id}/pages/{index}.json",
+                )
+            )
 
         # Word boxes are on disk now; holding thousands of them for the rest of
         # the run is what turns a large case file into a memory problem.

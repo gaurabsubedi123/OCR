@@ -10,7 +10,13 @@ import numpy as np
 import pytest
 from PIL import Image, ImageOps
 
-from ocrtool.config import MAX_RENDER_PIXELS, Settings
+from ocrtool.config import (
+    MAX_RENDER_PIXELS,
+    Settings,
+    default_folders,
+    save_default_folders,
+)
+from ocrtool.ledger import Ledger, LedgerEntry, recipe
 from ocrtool.discover import find_documents
 from ocrtool.models import FileResult, PageResult, Word
 from ocrtool.outputs import output_paths, write_json, write_pages_csv, write_text
@@ -39,6 +45,103 @@ def test_settings_round_trip():
     original = Settings(input_dir="/in", output_dir="/out", dpi=200, force_ocr=True)
     restored = Settings.from_dict({**original.to_dict(), "unknown_key": "ignored"})
     assert restored.dpi == 200 and restored.force_ocr is True
+
+
+# ----------------------------------------------------------- default folders
+
+
+def test_default_folders_fall_back_to_the_home_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("OCRTOOL_INPUT_DIR", raising=False)
+    monkeypatch.delenv("OCRTOOL_OUTPUT_DIR", raising=False)
+    folders = default_folders()
+    assert folders["input"].endswith("ocr-input")
+    assert folders["output"].endswith("ocr-output")
+
+
+def test_saved_folders_are_remembered_and_created(tmp_path, monkeypatch):
+    monkeypatch.delenv("OCRTOOL_INPUT_DIR", raising=False)
+    monkeypatch.delenv("OCRTOOL_OUTPUT_DIR", raising=False)
+    wanted_in, wanted_out = tmp_path / "scans", tmp_path / "results"
+
+    folders = save_default_folders(input_dir=str(wanted_in), output_dir=str(wanted_out))
+
+    assert folders == {"input": str(wanted_in), "output": str(wanted_out)}
+    assert wanted_in.is_dir() and wanted_out.is_dir(), "the folders should exist afterwards"
+    assert default_folders()["input"] == str(wanted_in), "and survive into the next call"
+
+
+def test_the_environment_wins_over_the_saved_folders(tmp_path, monkeypatch):
+    save_default_folders(input_dir=str(tmp_path / "saved"), output_dir=str(tmp_path / "saved-out"))
+    monkeypatch.setenv("OCRTOOL_INPUT_DIR", str(tmp_path / "from-env"))
+    assert default_folders()["input"] == str(tmp_path / "from-env")
+    assert default_folders()["output"] == str(tmp_path / "saved-out")
+
+
+# ------------------------------------------------------------------ ledger
+
+
+def _entry(tmp_path: Path, **overrides) -> LedgerEntry:
+    defaults = dict(
+        relpath="scan.pdf", size=100, mtime=1000.0, pages=2,
+        outputs={"txt": "txt/scan.txt"}, recipe=recipe({"dpi": 300, "lang": "eng"}),
+        run_id="20260101-000000", pages_json=None,
+    )
+    defaults.update(overrides)
+    return LedgerEntry(**defaults)
+
+
+def _ledger_with(tmp_path: Path, entry: LedgerEntry) -> tuple[Ledger, dict]:
+    ledger = Ledger(tmp_path)
+    ledger.record(entry)
+    written = tmp_path / "txt" / "scan.txt"
+    written.parent.mkdir(parents=True, exist_ok=True)
+    written.write_text("already read")
+    return ledger, {"txt": written}
+
+
+def test_the_ledger_recognises_work_it_has_already_done(tmp_path: Path):
+    ledger, wanted = _ledger_with(tmp_path, _entry(tmp_path))
+    found = ledger.already_done(
+        "scan.pdf", size=100, mtime=1000.0, settings={"dpi": 300, "lang": "eng"}, wanted=wanted
+    )
+    assert found is not None and found.run_id == "20260101-000000"
+
+
+def test_the_ledger_refuses_when_the_source_changed(tmp_path: Path):
+    ledger, wanted = _ledger_with(tmp_path, _entry(tmp_path))
+    settings = {"dpi": 300, "lang": "eng"}
+    assert ledger.already_done("scan.pdf", size=101, mtime=1000.0, settings=settings, wanted=wanted) is None
+    assert ledger.already_done("scan.pdf", size=100, mtime=9999.0, settings=settings, wanted=wanted) is None
+
+
+def test_the_ledger_refuses_when_the_settings_changed(tmp_path: Path):
+    ledger, wanted = _ledger_with(tmp_path, _entry(tmp_path))
+    assert ledger.already_done(
+        "scan.pdf", size=100, mtime=1000.0, settings={"dpi": 400, "lang": "eng"}, wanted=wanted
+    ) is None
+
+
+def test_the_ledger_refuses_when_an_output_is_missing(tmp_path: Path):
+    ledger, wanted = _ledger_with(tmp_path, _entry(tmp_path))
+    wanted["txt"].unlink()
+    assert ledger.already_done(
+        "scan.pdf", size=100, mtime=1000.0, settings={"dpi": 300, "lang": "eng"}, wanted=wanted
+    ) is None
+    # A kind that was never written cannot be reused either.
+    ledger2, _ = _ledger_with(tmp_path, _entry(tmp_path))
+    pdf = tmp_path / "pdf" / "scan.pdf"
+    pdf.parent.mkdir(parents=True, exist_ok=True)
+    pdf.write_bytes(b"%PDF")
+    assert ledger2.already_done(
+        "scan.pdf", size=100, mtime=1000.0, settings={"dpi": 300, "lang": "eng"},
+        wanted={"pdf": pdf},
+    ) is None
+
+
+def test_a_ledger_survives_being_written_and_read_again(tmp_path: Path):
+    ledger, wanted = _ledger_with(tmp_path, _entry(tmp_path))
+    assert len(Ledger(tmp_path)) == 1
 
 
 # --------------------------------------------------------------- discovery

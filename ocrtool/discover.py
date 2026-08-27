@@ -27,6 +27,9 @@ class Discovered:
     size_bytes: int
     page_count: int
     error: str | None = None
+    # Size and modification time together are how a later run decides whether
+    # this is still the same file it read before.
+    modified: float = -1.0
 
 
 def find_documents(root: Path, *, recursive: bool = True) -> list[Discovered]:
@@ -58,7 +61,8 @@ def find_documents(root: Path, *, recursive: bool = True) -> list[Discovered]:
 def _describe(path: Path, root: Path) -> Discovered:
     relpath = str(path.relative_to(root)).replace("\\", "/")
     try:
-        size = path.stat().st_size
+        stat = path.stat()
+        size, modified = stat.st_size, stat.st_mtime
     except OSError as exc:
         return Discovered(path, relpath, 0, 0, error=str(exc))
 
@@ -66,11 +70,11 @@ def _describe(path: Path, root: Path) -> Discovered:
         pages = count_pages(path)
     except Exception as exc:  # noqa: BLE001 - one bad file must not stop discovery
         log.warning("could not read %s: %s", path, exc)
-        return Discovered(path, relpath, size, 0, error=f"{type(exc).__name__}: {exc}")
+        return Discovered(path, relpath, size, 0, error=f"{type(exc).__name__}: {exc}", modified=modified)
 
     if pages == 0:
-        return Discovered(path, relpath, size, 0, error="no pages found in file")
-    return Discovered(path, relpath, size, pages)
+        return Discovered(path, relpath, size, 0, error="no pages found in file", modified=modified)
+    return Discovered(path, relpath, size, pages, modified=modified)
 
 
 def count_pages(path: Path) -> int:

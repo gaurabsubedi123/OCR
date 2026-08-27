@@ -27,10 +27,12 @@ or call a model over your documents.
 
 - [What you get](#what-you-get)
 - [Installing](#installing)
+- [Setting your folders](#setting-your-folders)
 - [Installing tesseract](#installing-tesseract)
 - [Using it in the browser](#using-it-in-the-browser)
 - [Using it from the command line](#using-it-from-the-command-line)
 - [Every option](#every-option)
+- [It does not read the same document twice](#it-does-not-read-the-same-document-twice)
 - [How it decides things](#how-it-decides-things)
 - [How fast it is](#how-fast-it-is)
 - [Troubleshooting](#troubleshooting)
@@ -118,6 +120,30 @@ ready
 ```
 
 Anything that says `MISSING` or `NOT FOUND` is a thing to fix before running.
+
+---
+
+## Setting your folders
+
+So you are not typing a long path every time — and WSL paths are long — the
+tool remembers a default input and output folder:
+
+```bash
+ocrtool folders --input ~/Desktop/ocr-input --output ~/Desktop/ocr-output
+ocrtool folders            # show what they are now
+```
+
+They are created if they do not exist, and both the browser form and the
+command line start from them:
+
+```bash
+ocrtool run                # reads the default input folder into the default output folder
+ocrtool ui                 # the form opens with both already filled in
+```
+
+Anything you pass explicitly still wins, and `OCRTOOL_INPUT_DIR` /
+`OCRTOOL_OUTPUT_DIR` in the environment override the saved values. The settings
+live in `~/.ocrtool/config.json`.
 
 ---
 
@@ -282,10 +308,52 @@ folder is the record, and the UI reads it back.
 | Write .json files | `--no-json` to disable | on | |
 | Save page pictures | `--no-previews` to disable | on | The browser viewer needs these. |
 | Sort outputs into `pdf/` `txt/` `json/` | `--outputs-together` to disable | on | Disabling puts a document's three files beside each other in one tree that mirrors your input. |
+| Skip documents already read | `--redo` to disable | on | Leaves alone any document this output folder already holds results for. See [above](#it-does-not-read-the-same-document-twice). |
 | Keep the page as it looks in the PDF | `--pdf-cleaned-image` to disable | on | Puts your original page picture into the searchable PDF instead of the greyscale copy OCR read. Disabling makes smaller files. |
 | Page segmentation mode | `--psm` | 3 | 3 automatic, 4 single column, 6 one block, 11/12 sparse text. |
 
-`OCRTOOL_TESSERACT` overrides where the tesseract binary is found.
+`OCRTOOL_TESSERACT` overrides where the tesseract binary is found;
+`OCRTOOL_INPUT_DIR` and `OCRTOOL_OUTPUT_DIR` override the default folders, and
+`OCRTOOL_STATE_DIR` moves `~/.ocrtool` somewhere else.
+
+---
+
+## It does not read the same document twice
+
+Run it again over the same folder and it reads only what is new:
+
+```
+Files     1 written, 0 failed of 13
+Pages     6 read (0 from text layers, 6 OCR'd, 0 failed)
+Skipped   12 documents (52 pages) already read into this folder — use --redo to read them again
+Time      2s
+```
+
+Each output folder keeps a small record of what has been read into it
+(`_runs/completed.json`). A document is left alone only when **all** of this
+holds:
+
+- the source file is unchanged — same size, same modification time
+- every output this run would write is already there
+- it was read with the same settings that matter: resolution, language,
+  segmentation mode, force-OCR, deskew, denoise, and whether the PDF keeps the
+  source image
+
+Anything else — an edited scan, a deleted output, a different resolution — and
+the document is read again. The check errs toward re-reading, because being
+wrong that way costs time, while being wrong the other way silently leaves you
+with a stale document.
+
+This is also how you resume. Stop a run halfway and start it again: whatever
+finished is on disk and is skipped, and the rest is read. And it means a folder
+you add to over weeks only ever costs the time of what you added.
+
+`--redo`, or unticking the box in the browser, reads everything again.
+Deleting `_runs/completed.json` has the same effect.
+
+A folder read before this feature existed is not wasted: the record is built
+from the earlier runs' manifests the first time, so those documents are
+recognised too.
 
 ---
 
@@ -439,6 +507,8 @@ ocrtool/
   pipeline.py     what happens to one page
   runner.py       one run: discovery, the page pool, progress, outputs
   outputs.py      .pdf / .txt / .json / pages.csv writers
+  pdfpage.py      put the original picture back under the searchable text
+  ledger.py       what this output folder has already read
   web/
     app.py        Flask routes and the event stream
     state.py      which runs this machine knows about

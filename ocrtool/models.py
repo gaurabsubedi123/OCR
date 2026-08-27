@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 PageSource = Literal["text-layer", "ocr", "skipped", "failed"]
-FileStatus = Literal["pending", "running", "done", "failed", "cancelled"]
+FileStatus = Literal["pending", "running", "done", "skipped", "failed", "cancelled"]
 
 
 @dataclass
@@ -100,6 +100,10 @@ class FileResult:
     error: str | None = None
     duration_ms: int = 0
     outputs: dict[str, str] = field(default_factory=dict)
+    modified: float = -1.0
+    # Set when this document was read by an earlier run into the same folder
+    # and did not need reading again.
+    skipped_from_run: str | None = None
 
     @property
     def ocr_pages(self) -> int:
@@ -135,6 +139,7 @@ class FileResult:
             "duration_ms": self.duration_ms,
             "error": self.error,
             "outputs": self.outputs,
+            "skipped_from_run": self.skipped_from_run,
         }
 
     def to_dict(self, *, include_words: bool = True) -> dict[str, Any]:

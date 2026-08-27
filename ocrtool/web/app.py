@@ -32,7 +32,14 @@ from flask import (
 )
 
 from .. import __version__
-from ..config import DEFAULT_DPI, DEFAULT_MIN_CONFIDENCE, DEFAULT_PSM, Settings, default_workers
+from ..config import (
+    DEFAULT_DPI,
+    DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_PSM,
+    Settings,
+    default_folders,
+    default_workers,
+)
 from ..discover import find_documents
 from ..runner import Run, load_document, load_run
 from ..tesseract import installed_languages, tesseract_path, tesseract_version
@@ -49,8 +56,9 @@ UPLOAD_DIRNAME = "_uploads"
 def create_app(*, default_input: str | None = None, default_output: str | None = None) -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024 * 1024  # 4 GB of scans in one go
-    app.config["DEFAULT_INPUT"] = default_input or ""
-    app.config["DEFAULT_OUTPUT"] = default_output or str(Path.home() / "ocr-output")
+    folders = default_folders()
+    app.config["DEFAULT_INPUT"] = default_input or folders["input"]
+    app.config["DEFAULT_OUTPUT"] = default_output or folders["output"]
     app.config["JSON_SORT_KEYS"] = False
     app.register_blueprint(bp)
     return app
@@ -249,6 +257,7 @@ def api_start_run() -> Any:
         write_previews=bool(payload.get("write_previews", True)),
         pdf_keeps_source_image=bool(payload.get("pdf_keeps_source_image", True)),
         outputs_grouped_by_type=bool(payload.get("outputs_grouped_by_type", True)),
+        skip_already_done=bool(payload.get("skip_already_done", True)),
         min_confidence=float(payload.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
         recursive=bool(payload.get("recursive", True)),
     )

@@ -62,7 +62,7 @@ async function postJSON(url, body) {
 
 const STATUS_CLASS = {
   done: 'good', running: 'live', discovering: 'live', pending: '',
-  failed: 'bad', cancelled: 'warn',
+  skipped: '', failed: 'bad', cancelled: 'warn',
 };
 
 function statusPill(status, extra = '') {

@@ -152,6 +152,25 @@ def test_uploaded_files_are_staged_and_can_be_read(client, sample_folder: Path, 
     assert _wait_for(client, run_id)["totals"]["pages_done"] == 2
 
 
+@needs_tesseract
+def test_the_browser_reports_documents_it_did_not_need_to_read(client, sample_folder: Path, tmp_path: Path):
+    output = tmp_path / "output"
+    body = {"input_dir": str(sample_folder), "output_dir": str(output), "dpi": 150, "workers": 2}
+
+    first = client.post("/api/runs", json=body).get_json()["run_id"]
+    _wait_for(client, first)
+
+    second = client.post("/api/runs", json=body).get_json()["run_id"]
+    snapshot = _wait_for(client, second)
+
+    assert snapshot["totals"]["files_skipped"] == 2
+    assert snapshot["totals"]["pages_done"] == 0
+    assert all(f["status"] == "skipped" for f in snapshot["files"])
+    # The skipped document still opens, with the earlier run's text in it.
+    document = client.get(f"/api/runs/{second}/documents/0").get_json()
+    assert "MARTINEZ" in document["pages"][0]["text"]
+
+
 def test_an_upload_cannot_escape_the_staging_folder(client, tmp_path: Path):
     output = tmp_path / "output"
     uploaded = client.post(

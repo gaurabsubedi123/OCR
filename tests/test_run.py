@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import json
+import time
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -293,6 +294,110 @@ def test_outputs_can_be_kept_beside_each_other(sample_folder: Path, tmp_path: Pa
     assert (out / "scan.txt").is_file()
     assert (out / "sub" / "page.json").is_file()
     assert not (out / "pdf").exists()
+
+
+@needs_tesseract
+def test_a_second_run_leaves_finished_documents_alone(sample_folder: Path, tmp_path: Path):
+    """Adding four documents to a folder should cost the time of four
+    documents, not the time of the whole folder again."""
+    first = run_blocking(_settings(sample_folder, tmp_path))
+    assert first.totals.pages_done == 3
+
+    written = tmp_path / "output" / "txt" / "scan.txt"
+    stamp = written.stat().st_mtime_ns
+
+    second = run_blocking(_settings(sample_folder, tmp_path))
+    assert second.totals.files_skipped == 2
+    assert second.totals.pages_skipped == 3
+    assert second.totals.pages_done == 0, "nothing should have been read again"
+    assert second.totals.pages_total == 0, "and nothing should be counted as work to do"
+    assert written.stat().st_mtime_ns == stamp, "the output was rewritten"
+    assert all(f.status == "skipped" for f in second.files)
+    assert second.files[0].skipped_from_run == first.run_id
+
+
+@needs_tesseract
+def test_only_the_new_document_is_read(sample_folder: Path, tmp_path: Path):
+    run_blocking(_settings(sample_folder, tmp_path))
+    text_page(["A LATE ARRIVAL", "Case No. A-00-123456-C"]).save(sample_folder / "extra.png")
+
+    second = run_blocking(_settings(sample_folder, tmp_path))
+    assert second.totals.files_skipped == 2
+    assert second.totals.pages_done == 1
+    assert (tmp_path / "output" / "txt" / "extra.txt").is_file()
+
+
+@needs_tesseract
+def test_an_edited_source_is_read_again(sample_folder: Path, tmp_path: Path):
+    run_blocking(_settings(sample_folder, tmp_path))
+    # Same name, different content: the size and modification time both move.
+    text_page(["THIS PAGE WAS RESCANNED", "Case No. A-00-123456-C", "x" * 40]).save(
+        sample_folder / "sub" / "page.png"
+    )
+
+    second = run_blocking(_settings(sample_folder, tmp_path))
+    assert second.totals.files_skipped == 1
+    assert "RESCANNED" in (tmp_path / "output" / "txt" / "sub" / "page.txt").read_text()
+
+
+@needs_tesseract
+def test_changing_a_setting_reads_everything_again(sample_folder: Path, tmp_path: Path):
+    run_blocking(_settings(sample_folder, tmp_path, dpi=150))
+    second = run_blocking(_settings(sample_folder, tmp_path, dpi=200))
+    assert second.totals.files_skipped == 0
+    assert second.totals.pages_done == 3
+
+
+@needs_tesseract
+def test_a_deleted_output_is_written_again(sample_folder: Path, tmp_path: Path):
+    run_blocking(_settings(sample_folder, tmp_path))
+    (tmp_path / "output" / "txt" / "scan.txt").unlink()
+
+    second = run_blocking(_settings(sample_folder, tmp_path))
+    assert second.totals.files_skipped == 1
+    assert (tmp_path / "output" / "txt" / "scan.txt").is_file()
+
+
+@needs_tesseract
+def test_reading_everything_again_can_be_asked_for(sample_folder: Path, tmp_path: Path):
+    run_blocking(_settings(sample_folder, tmp_path))
+    second = run_blocking(_settings(sample_folder, tmp_path, skip_already_done=False))
+    assert second.totals.files_skipped == 0
+    assert second.totals.pages_done == 3
+
+
+@needs_tesseract
+def test_a_skipped_document_still_opens_in_the_viewer(sample_folder: Path, tmp_path: Path):
+    """The results page of the second run must show the earlier run's text, or
+    every skipped document looks like an empty one."""
+    run_blocking(_settings(sample_folder, tmp_path))
+    second = run_blocking(_settings(sample_folder, tmp_path))
+
+    document = load_document(tmp_path / "output", second.run_id, 0)
+    assert document is not None
+    assert "MARTINEZ" in document["pages"][0]["text"]
+    assert document["outputs"], "the links to its files must survive too"
+
+
+@needs_tesseract
+def test_an_interrupted_run_can_be_finished_by_starting_it_again(sample_folder: Path, tmp_path: Path):
+    """Stopping mid-way and starting again is the same mechanism as adding new
+    files: whatever finished is on disk, and whatever did not is still work."""
+    run = Run(_settings(sample_folder, tmp_path, workers=1))
+    run.start()
+    # Let one document finish, then stop.
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline and run.totals.files_done < 1:
+        time.sleep(0.1)
+    run.cancel()
+    run.join(timeout=60)
+    assert run.totals.files_done >= 1
+
+    resumed = run_blocking(_settings(sample_folder, tmp_path))
+    assert resumed.totals.files_skipped >= 1
+    assert resumed.status == "done"
+    assert (tmp_path / "output" / "txt" / "scan.txt").is_file()
+    assert (tmp_path / "output" / "txt" / "sub" / "page.txt").is_file()
 
 
 def test_a_run_over_an_empty_folder_finishes_and_says_so(tmp_path: Path):

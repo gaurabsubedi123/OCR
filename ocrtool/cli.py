@@ -12,7 +12,16 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .config import DEFAULT_DPI, DEFAULT_MIN_CONFIDENCE, DEFAULT_PSM, Settings, default_workers
+from .config import (
+    DEFAULT_DPI,
+    DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_PSM,
+    Settings,
+    config_path,
+    default_folders,
+    default_workers,
+    save_default_folders,
+)
 from .runner import Run, run_blocking
 from .tesseract import installed_languages, tesseract_path, tesseract_version
 
@@ -25,9 +34,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"ocrtool {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    folders = default_folders()
+
     run_cmd = sub.add_parser("run", help="OCR a folder from the command line")
-    run_cmd.add_argument("input", help="folder of documents to read")
-    run_cmd.add_argument("-o", "--output", required=True, help="folder to write results into")
+    run_cmd.add_argument(
+        "input", nargs="?", default=None, help=f"folder of documents to read (default {folders['input']})"
+    )
+    run_cmd.add_argument(
+        "-o", "--output", default=None, help=f"folder to write results into (default {folders['output']})"
+    )
     run_cmd.add_argument("--dpi", type=int, default=DEFAULT_DPI, help=f"render resolution (default {DEFAULT_DPI})")
     run_cmd.add_argument("--lang", default="eng", help="tesseract language code (default eng)")
     run_cmd.add_argument("--psm", type=int, default=DEFAULT_PSM, help=f"page segmentation mode (default {DEFAULT_PSM})")
@@ -39,6 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("--no-txt", action="store_true", help="skip the .txt files")
     run_cmd.add_argument("--no-json", action="store_true", help="skip the .json files")
     run_cmd.add_argument("--no-previews", action="store_true", help="skip page images (the UI needs these)")
+    run_cmd.add_argument(
+        "--redo",
+        action="store_true",
+        help="read every document again, even ones this output folder already holds results for",
+    )
     run_cmd.add_argument(
         "--outputs-together",
         action="store_true",
@@ -61,24 +81,31 @@ def main(argv: list[str] | None = None) -> int:
     ui_cmd = sub.add_parser("ui", help="start the local web interface")
     ui_cmd.add_argument("--host", default="127.0.0.1", help="default 127.0.0.1 — this machine only")
     ui_cmd.add_argument("--port", type=int, default=5000)
-    ui_cmd.add_argument("--output", default=None, help="default output folder to offer in the form")
-    ui_cmd.add_argument("--input", default=None, help="default input folder to offer in the form")
+    ui_cmd.add_argument("--output", default=None, help=f"output folder to offer in the form (default {folders['output']})")
+    ui_cmd.add_argument("--input", default=None, help=f"input folder to offer in the form (default {folders['input']})")
     ui_cmd.add_argument("--debug", action="store_true")
 
     sub.add_parser("doctor", help="check that everything this tool needs is present")
+
+    folders_cmd = sub.add_parser("folders", help="show or set the default input and output folders")
+    folders_cmd.add_argument("--input", default=None, help="folder to read documents from by default")
+    folders_cmd.add_argument("--output", default=None, help="folder to write results into by default")
 
     args = parser.parse_args(argv)
     if args.command == "run":
         return _cmd_run(args)
     if args.command == "ui":
         return _cmd_ui(args)
+    if args.command == "folders":
+        return _cmd_folders(args)
     return _cmd_doctor()
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    folders = default_folders()
     settings = Settings(
-        input_dir=args.input,
-        output_dir=args.output,
+        input_dir=args.input or folders["input"],
+        output_dir=args.output or folders["output"],
         dpi=args.dpi,
         lang=args.lang,
         psm=args.psm,
@@ -92,6 +119,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         write_previews=not args.no_previews,
         pdf_keeps_source_image=not args.pdf_cleaned_image,
         outputs_grouped_by_type=not args.outputs_together,
+        skip_already_done=not args.redo,
         min_confidence=args.min_confidence,
         recursive=not args.no_recursive,
     )
@@ -152,6 +180,11 @@ def _report(run: Run) -> int:
         f"Pages     {totals.pages_done} read "
         f"({totals.pages_text_layer} from text layers, {totals.pages_ocr} OCR'd, {totals.pages_failed} failed)"
     )
+    if totals.files_skipped:
+        print(
+            f"Skipped   {totals.files_skipped} documents ({totals.pages_skipped} pages) "
+            "already read into this folder — use --redo to read them again"
+        )
     print(f"Flagged   {totals.pages_flagged} pages need a look")
     print(f"Time      {_duration(run.elapsed_s)}")
     print(f"Output    {run.settings.output_path}")
@@ -164,13 +197,33 @@ def _report(run: Run) -> int:
 def _cmd_ui(args: argparse.Namespace) -> int:
     from .web.app import create_app
 
-    app = create_app(default_input=args.input, default_output=args.output)
+    folders = default_folders()
+    app = create_app(
+        default_input=args.input or folders["input"],
+        default_output=args.output or folders["output"],
+    )
     url = f"http://{args.host}:{args.port}"
     print(f"ocrtool {__version__}")
     print(f"tesseract: {tesseract_version() or 'NOT FOUND — run `ocrtool doctor`'}")
+    print(f"reading from: {args.input or folders['input']}")
+    print(f"writing to:   {args.output or folders['output']}")
     print(f"\n  Open {url}\n")
     print("Ctrl-C to stop.")
     app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
+    return 0
+
+
+def _cmd_folders(args: argparse.Namespace) -> int:
+    if args.input or args.output:
+        folders = save_default_folders(input_dir=args.input, output_dir=args.output)
+        print(f"saved in {config_path()}\n")
+    else:
+        folders = default_folders()
+
+    for label, key in (("input ", "input"), ("output", "output")):
+        path = Path(folders[key]).expanduser()
+        state = "" if path.is_dir() else "   (does not exist yet)"
+        print(f"{label}  {path}{state}")
     return 0
 
 
@@ -200,6 +253,9 @@ def _cmd_doctor() -> int:
             print(f"{module:11} MISSING — run: uv pip install -e .")
             ok = False
 
+    folders = default_folders()
+    print(f"input       {folders['input']}")
+    print(f"output      {folders['output']}")
     print(f"workers     {default_workers()} by default on this machine")
     print("\nready" if ok else "\nnot ready — fix the lines marked above")
     return 0 if ok else 1

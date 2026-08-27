@@ -6,10 +6,14 @@ these carries the measurement or the constraint that produced it.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 # Tesseract is trained at roughly 300 dpi. Below ~200 it degrades sharply;
 # above 400 the render cost climbs and accuracy does not follow.
@@ -70,6 +74,79 @@ SUPPORTED_SUFFIXES = {
 RESERVED_DIRS = {"_runs", "_previews", "_uploads"}
 
 
+def state_dir() -> Path:
+    """Where this tool keeps its own small files: the list of past runs, and
+    the remembered folders. OCRTOOL_STATE_DIR redirects it, which the tests use
+    so a test run never appears in the list someone is working through."""
+    override = os.environ.get("OCRTOOL_STATE_DIR")
+    path = Path(override).expanduser() if override else Path.home() / ".ocrtool"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def config_path() -> Path:
+    return state_dir() / "config.json"
+
+
+def default_folders() -> dict[str, str]:
+    """The input and output folders offered before anyone types anything.
+
+    Resolved in this order, most specific first:
+
+      1. OCRTOOL_INPUT_DIR / OCRTOOL_OUTPUT_DIR in the environment
+      2. input_dir / output_dir in ~/.ocrtool/config.json
+      3. ~/ocr-input and ~/ocr-output
+
+    Typing an absolute path every time is exactly the kind of friction that
+    makes a tool annoying to use daily, and on WSL the path is long and easy to
+    get wrong. `ocrtool folders` sets them.
+    """
+    folders = {
+        "input": str(Path.home() / "ocr-input"),
+        "output": str(Path.home() / "ocr-output"),
+    }
+
+    path = config_path()
+    if path.is_file():
+        try:
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            for key, stored_key in (("input", "input_dir"), ("output", "output_dir")):
+                if stored.get(stored_key):
+                    folders[key] = str(Path(stored[stored_key]).expanduser())
+        except (OSError, json.JSONDecodeError, TypeError) as exc:
+            log.warning("could not read %s: %s", path, exc)
+
+    for key, variable in (("input", "OCRTOOL_INPUT_DIR"), ("output", "OCRTOOL_OUTPUT_DIR")):
+        value = os.environ.get(variable)
+        if value:
+            folders[key] = str(Path(value).expanduser())
+
+    return folders
+
+
+def save_default_folders(*, input_dir: str | None = None, output_dir: str | None = None) -> dict[str, str]:
+    """Remember these folders for next time, and make them if they are missing."""
+    path = config_path()
+    stored: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            stored = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            stored = {}
+
+    for key, value in (("input_dir", input_dir), ("output_dir", output_dir)):
+        if value:
+            folder = Path(value).expanduser()
+            stored[key] = str(folder)
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                log.warning("could not create %s: %s", folder, exc)
+
+    path.write_text(json.dumps(stored, indent=2), encoding="utf-8")
+    return default_folders()
+
+
 def default_workers() -> int:
     """Threads for the page pool.
 
@@ -105,6 +182,9 @@ class Settings:
     # output/json/ — each keeping the input's subfolder structure inside it.
     # Off puts a document's three files beside each other instead.
     outputs_grouped_by_type: bool = True
+    # Leave a document alone if this output folder already holds its results,
+    # the source has not changed, and it was read with these same settings.
+    skip_already_done: bool = True
     # Put the original page picture back into the searchable PDF instead of the
     # greyscale copy OCR read. Truer to the document, and a larger file.
     pdf_keeps_source_image: bool = True
