@@ -15,6 +15,7 @@ is a way of looking at it, not a place things are kept.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,13 @@ RECENT_LIMIT = 40
 
 
 def state_dir() -> Path:
-    path = Path.home() / ".ocrtool"
+    """Where the list of past runs lives.
+
+    OCRTOOL_STATE_DIR redirects it, which the tests set: a test run must never
+    appear in the list of runs someone is actually working through.
+    """
+    override = os.environ.get("OCRTOOL_STATE_DIR")
+    path = Path(override).expanduser() if override else Path.home() / ".ocrtool"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -34,7 +41,13 @@ class Registry:
     def __init__(self) -> None:
         self._runs: dict[str, Run] = {}
         self._lock = threading.RLock()
-        self._recent_path = state_dir() / "recent.json"
+
+    @property
+    def _recent_path(self) -> Path:
+        # Resolved per call rather than at construction, so redirecting the
+        # state folder takes effect even though the registry is created when
+        # the module is first imported.
+        return state_dir() / "recent.json"
 
     # ------------------------------------------------------------ live runs
 

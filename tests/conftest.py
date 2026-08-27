@@ -68,6 +68,16 @@ def is_greyscale(image: Image.Image) -> bool:
     return all(r == g == b for _, (r, g, b) in colours)
 
 
+@pytest.fixture(autouse=True)
+def isolated_state(tmp_path, monkeypatch):
+    """Keep the suite out of the real ~/.ocrtool.
+
+    Without this, running the tests fills the "earlier runs" list in someone's
+    browser with pytest temporary folders — which is exactly what happened.
+    """
+    monkeypatch.setenv("OCRTOOL_STATE_DIR", str(tmp_path / "state"))
+
+
 @pytest.fixture
 def sample_folder(tmp_path: Path) -> Path:
     """A folder shaped like a real one: a multi-page PDF, an image in a
