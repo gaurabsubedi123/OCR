@@ -44,7 +44,7 @@ For every document, in a folder tree that mirrors your input exactly:
 
 | File | What it is |
 | --- | --- |
-| `name.pdf` | The same pages, now with selectable, searchable text behind the page image. Pages that already had a text layer are copied through untouched. |
+| `name.pdf` | The same pages, now with selectable, searchable text behind the page image — open it in any PDF reader and Ctrl-F works. The page still looks like your original, in colour; pages that already had a text layer are copied through untouched. |
 | `name.txt` | Plain text, with a `----- page 3 (ocr) -----` marker before each page saying where that page's text came from. |
 | `name.json` | Per page: the text, tesseract's confidence, whether it was flagged, and every word with its position on the page image. |
 
@@ -275,6 +275,7 @@ folder is the record, and the UI reads it back.
 | Write .txt files | `--no-txt` to disable | on | |
 | Write .json files | `--no-json` to disable | on | |
 | Save page pictures | `--no-previews` to disable | on | The browser viewer needs these. |
+| Keep the page as it looks in the PDF | `--pdf-cleaned-image` to disable | on | Puts your original page picture into the searchable PDF instead of the greyscale copy OCR read. Disabling makes smaller files. |
 | Page segmentation mode | `--psm` | 3 | 3 automatic, 4 single column, 6 one block, 11/12 sparse text. |
 
 `OCRTOOL_TESSERACT` overrides where the tesseract binary is found.
@@ -312,6 +313,16 @@ but the failure is total and silent.
 from tesseract, which writes the page image with its recognised text laid
 invisibly on top. Text-layer pages are imported from the original PDF unchanged,
 since they are already searchable and re-rendering would only lose fidelity.
+
+**And the picture in it is your page, not the cleaned-up copy.** Tesseract
+builds its PDF around the image it was handed, which has been made greyscale and
+despeckled for recognition — so a photograph exhibit came back grey, and so
+would a highlighted passage, a red stamp, or blue signature ink. The recognised
+text stays exactly where tesseract put it and only the picture underneath is
+swapped back for the original render, rotated to match if the page was
+straightened. A test checks that every character box still lands on ink after
+deskewing. `--pdf-cleaned-image` keeps tesseract's version if you would rather
+have the smaller file.
 
 **Flagging is deliberately blunt.** A page is flagged when its average word
 confidence is below the threshold, or when it produced almost no text at all.
@@ -351,6 +362,11 @@ to the binary. `ocrtool doctor` shows what is being found.
 searchable-PDF writer needs `pdf.ttf` in your `tessdata` folder. The text is
 still read and written; only that page's PDF layer is missing. Installing the
 distribution's `tesseract-ocr` package normally supplies it.
+
+**The PDF looks right but nothing is selectable.** Check the run's `pages.csv`
+for that page. A page with `source=ocr` and 0 characters produced no text to
+embed; a page whose `error` column mentions `pdf.ttf` was read but could not
+have its PDF layer written.
 
 **A page came out empty.** Open it in the viewer: if the picture is blank, the
 source is blank. If there is visible text, try `--psm 6` (one uniform block) or

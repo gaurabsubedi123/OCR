@@ -48,6 +48,26 @@ def text_page(lines: list[str] | None = None, *, size=(1700, 2200), skew: float 
     return image
 
 
+def colour_page(*, size=(1700, 2200), skew: float = 0.0) -> Image.Image:
+    """A page that is coloured the way real exhibits are: a red stamp, ink in
+    blue, black body text."""
+    image = Image.new("RGB", size, (252, 248, 240))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([100, 100, size[0] - 100, 260], fill=(170, 25, 35))
+    draw.text((150, 160), "EXHIBIT 25 - PHOTOGRAPH LOG", fill="white", font=_font())
+    draw.text((150, 420), "Amount billed: $4,238.75", fill=(20, 45, 140), font=_font())
+    draw.text((150, 540), "Date of service: March 14, 2021", fill="black", font=_font())
+    if skew:
+        image = image.rotate(skew, resample=Image.BICUBIC, expand=False, fillcolor="white")
+    return image
+
+
+def is_greyscale(image: Image.Image) -> bool:
+    colours = image.convert("RGB").getcolors(maxcolors=500_000)
+    assert colours is not None, "image has too many distinct colours to sample"
+    return all(r == g == b for _, (r, g, b) in colours)
+
+
 @pytest.fixture
 def sample_folder(tmp_path: Path) -> Path:
     """A folder shaped like a real one: a multi-page PDF, an image in a

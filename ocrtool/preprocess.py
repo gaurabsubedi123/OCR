@@ -67,6 +67,21 @@ def preprocess(image: Image.Image, *, deskew: bool = True, denoise: bool = True)
     return Preprocessed(image=gray, skew_corrected=round(angle, 2), upscaled=round(scale, 2))
 
 
+def apply_geometry(image: Image.Image, *, skew: float, size: tuple[int, int]) -> Image.Image:
+    """Reshape an untouched page image the way `preprocess` reshaped its copy.
+
+    Only the geometry is repeated — the rotation and the scaling — never the
+    greyscale or the filtering. That is the point: the result lines up pixel for
+    pixel with the image OCR read, while still looking like the original page.
+    """
+    result = image
+    if abs(skew) >= MIN_CORRECTION:
+        result = result.rotate(skew, resample=Image.BICUBIC, expand=True, fillcolor="white")
+    if result.size != size:
+        result = result.resize(size, Image.LANCZOS)
+    return result
+
+
 def _estimate_skew(gray: Image.Image) -> float:
     """Projection-profile skew estimate.
 

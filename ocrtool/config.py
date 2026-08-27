@@ -101,6 +101,9 @@ class Settings:
     write_json: bool = True
     include_word_boxes: bool = True
     write_previews: bool = True
+    # Put the original page picture back into the searchable PDF instead of the
+    # greyscale copy OCR read. Truer to the document, and a larger file.
+    pdf_keeps_source_image: bool = True
     min_confidence: float = DEFAULT_MIN_CONFIDENCE
     recursive: bool = True
 

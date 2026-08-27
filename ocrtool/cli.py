@@ -39,6 +39,11 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("--no-txt", action="store_true", help="skip the .txt files")
     run_cmd.add_argument("--no-json", action="store_true", help="skip the .json files")
     run_cmd.add_argument("--no-previews", action="store_true", help="skip page images (the UI needs these)")
+    run_cmd.add_argument(
+        "--pdf-cleaned-image",
+        action="store_true",
+        help="put the greyscale image OCR read into the PDF instead of the original page (smaller files)",
+    )
     run_cmd.add_argument("--no-recursive", action="store_true", help="only the top level of the folder")
     run_cmd.add_argument(
         "--min-confidence",
@@ -80,6 +85,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         write_txt=not args.no_txt,
         write_json=not args.no_json,
         write_previews=not args.no_previews,
+        pdf_keeps_source_image=not args.pdf_cleaned_image,
         min_confidence=args.min_confidence,
         recursive=not args.no_recursive,
     )

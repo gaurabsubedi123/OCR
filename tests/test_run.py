@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 import pytest
-from conftest import needs_tesseract, text_page
+from conftest import colour_page, is_greyscale, needs_tesseract, text_page
 
 from ocrtool.config import Settings
 from ocrtool.models import PageResult
@@ -74,6 +74,100 @@ def test_the_pdf_copy_is_actually_searchable(sample_folder: Path, tmp_path: Path
         assert "MARTINEZ" in found
     finally:
         pdf.close()
+
+
+@needs_tesseract
+def test_the_searchable_pdf_keeps_the_page_in_colour(tmp_path: Path):
+    """OCR reads a cleaned-up greyscale copy, but the PDF you keep must still
+    look like the document. A photograph exhibit, a highlighted passage and a
+    red stamp are all coloured for a reason."""
+    folder = tmp_path / "in"
+    folder.mkdir()
+    colour_page().save(folder / "exhibit.png")
+
+    run_blocking(Settings(input_dir=str(folder), output_dir=str(tmp_path / "out"), dpi=150, workers=1))
+
+    pdf = pdfium.PdfDocument(str(tmp_path / "out" / "exhibit.pdf"))
+    try:
+        page = pdf[0]
+        textpage = page.get_textpage()
+        text = textpage.get_text_range()
+        textpage.close()
+        rendered = page.render(scale=0.4).to_pil()
+        page.close()
+    finally:
+        pdf.close()
+
+    assert "EXHIBIT" in text, "the page must still be searchable"
+    assert not is_greyscale(rendered), "the colour of the source page was lost"
+
+
+@needs_tesseract
+def test_the_cleaned_image_can_be_kept_instead(tmp_path: Path):
+    folder = tmp_path / "in"
+    folder.mkdir()
+    colour_page().save(folder / "exhibit.png")
+
+    run_blocking(Settings(
+        input_dir=str(folder), output_dir=str(tmp_path / "out"),
+        dpi=150, workers=1, pdf_keeps_source_image=False,
+    ))
+
+    pdf = pdfium.PdfDocument(str(tmp_path / "out" / "exhibit.pdf"))
+    try:
+        page = pdf[0]
+        rendered = page.render(scale=0.4).to_pil()
+        page.close()
+    finally:
+        pdf.close()
+    assert is_greyscale(rendered)
+
+
+@needs_tesseract
+def test_the_invisible_text_still_lines_up_after_deskewing(tmp_path: Path):
+    """The replacement picture is rotated the same way the OCR'd copy was, so
+    every character box should land on ink. If the geometry were skipped, the
+    text would float over a page tilted the other way."""
+    import numpy as np
+
+    folder = tmp_path / "in"
+    folder.mkdir()
+    colour_page(skew=1.8).save(folder / "skewed.png")
+
+    run_blocking(Settings(input_dir=str(folder), output_dir=str(tmp_path / "out"), dpi=150, workers=1))
+
+    pdf = pdfium.PdfDocument(str(tmp_path / "out" / "skewed.pdf"))
+    try:
+        page = pdf[0]
+        textpage = page.get_textpage()
+        rendered = page.render(scale=1.0).to_pil().convert("L")
+        ink = np.asarray(rendered)
+        width_pt, height_pt = page.get_size()
+        scale_x, scale_y = rendered.width / width_pt, rendered.height / height_pt
+
+        on_ink = checked = 0
+        for index in range(textpage.count_chars()):
+            box = textpage.get_charbox(index)
+            if not box:
+                continue
+            left, bottom, right, top = box
+            if right - left < 1 or top - bottom < 1:
+                continue
+            patch = ink[
+                max(0, int((height_pt - top) * scale_y)) : int((height_pt - bottom) * scale_y),
+                max(0, int(left * scale_x)) : int(right * scale_x),
+            ]
+            if patch.size == 0:
+                continue
+            checked += 1
+            on_ink += int(patch.min() < 160)
+        textpage.close()
+        page.close()
+    finally:
+        pdf.close()
+
+    assert checked > 20, "the page produced too few characters to judge alignment"
+    assert on_ink / checked > 0.9, f"only {on_ink}/{checked} characters sit on ink"
 
 
 @needs_tesseract

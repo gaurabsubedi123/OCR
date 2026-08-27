@@ -247,6 +247,7 @@ def api_start_run() -> Any:
         write_json=bool(payload.get("write_json", True)),
         include_word_boxes=bool(payload.get("include_word_boxes", True)),
         write_previews=bool(payload.get("write_previews", True)),
+        pdf_keeps_source_image=bool(payload.get("pdf_keeps_source_image", True)),
         min_confidence=float(payload.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
         recursive=bool(payload.get("recursive", True)),
     )

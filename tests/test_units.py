@@ -18,9 +18,11 @@ from ocrtool.pipeline import _flag
 from ocrtool.preprocess import _estimate_skew, preprocess
 from ocrtool.render import _fit, render_page
 from ocrtool.tesseract import parse_tsv
+from ocrtool.pdfpage import replace_page_image
+from ocrtool.preprocess import apply_geometry
 from ocrtool.textlayer import _tidy, read_text_layer
 
-from conftest import text_page
+from conftest import colour_page, text_page
 
 
 # --------------------------------------------------------------- settings
@@ -127,6 +129,24 @@ def test_skew_estimate_survives_a_blank_page():
 def test_preprocess_upscales_a_small_scan():
     small = text_page(["tiny"], size=(600, 400))
     assert preprocess(small).upscaled > 1.0
+
+
+def test_geometry_can_be_reapplied_to_the_untouched_page():
+    """The searchable PDF gets the original picture back, so that picture has to
+    end up exactly the shape of the image OCR read — or the invisible text sits
+    in the wrong place."""
+    original = colour_page(skew=2.0)
+    cleaned = preprocess(original)
+    replacement = apply_geometry(original, skew=cleaned.skew_corrected, size=cleaned.image.size)
+
+    assert replacement.size == cleaned.image.size
+    assert replacement.mode == "RGB", "the replacement must keep its colour"
+
+
+def test_replacing_a_page_image_gives_up_rather_than_corrupting():
+    """Anything unexpected returns the page untouched: a wrongly-coloured
+    picture is cosmetic, a lost page is not."""
+    assert replace_page_image(b"not a pdf at all", colour_page()) == b"not a pdf at all"
 
 
 # --------------------------------------------------------------- tesseract

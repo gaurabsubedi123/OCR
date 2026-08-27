@@ -20,7 +20,8 @@ from pathlib import Path
 
 from .config import MIN_CHARS_FOR_A_REAL_PAGE, Settings
 from .models import PageResult
-from .preprocess import preprocess
+from .pdfpage import replace_page_image
+from .preprocess import apply_geometry, preprocess
 from .render import render_page, write_preview
 from .tesseract import TesseractFailed, run_tesseract
 from .textlayer import read_text_layer
@@ -133,8 +134,16 @@ def _process(work: PageWork, settings: Settings, started: float) -> PageResult:
             recovered = True
 
     if want_pdf and out.pdf_bytes and work.page_pdf_dest is not None:
+        page_pdf = out.pdf_bytes
+        if settings.pdf_keeps_source_image:
+            # Tesseract built this page around the cleaned greyscale image it
+            # read. Put the real page back underneath the text it found.
+            page_pdf = replace_page_image(
+                page_pdf,
+                apply_geometry(image, skew=cleaned.skew_corrected, size=cleaned.image.size),
+            )
         work.page_pdf_dest.parent.mkdir(parents=True, exist_ok=True)
-        work.page_pdf_dest.write_bytes(out.pdf_bytes)
+        work.page_pdf_dest.write_bytes(page_pdf)
 
     result = _ocr_result(work, out, cleaned.skew_corrected, width, height, preview_rel, started)
     if recovered:
