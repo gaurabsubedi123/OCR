@@ -121,9 +121,15 @@ installs into a local virtual environment.
 ### Get it
 
 ```bash
-git clone https://github.com/<your-account>/ocrtool.git
-cd ocrtool
+git clone git@github.com:gaurabsubedi123/OCR.git
+cd OCR
 ```
+
+Over HTTPS instead — `git clone https://github.com/gaurabsubedi123/OCR.git` —
+which asks for your GitHub username and a personal access token as the
+password. While the repository is private you need one or the other on every
+machine you clone to: an SSH key added at **github.com/settings/keys**, or a
+token with the `repo` scope from **github.com/settings/tokens**.
 
 ### With uv (recommended — fastest)
 
@@ -139,6 +145,11 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+**On Windows without WSL**, the same two steps have different spellings —
+`py -m venv .venv`, then `.venv\Scripts\activate`, then the same
+`pip install -e ".[dev]"`. Everywhere else in this README, a command written as
+`.venv/bin/ocrtool` is `.venv\Scripts\ocrtool` on Windows.
 
 Nothing is machine-specific in the repository. Your folder choices live in
 `~/.ocrtool/config.json` on whichever machine you are on, not in the checkout,
