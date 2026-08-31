@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -42,11 +43,13 @@ def test_a_whole_folder_becomes_a_folder_of_results(sample_folder: Path, tmp_pat
     assert run.totals.pages_done == 3
     assert run.totals.pages_failed == 0
 
-    # Each kind of output has its own folder, with the input structure inside.
+    # The input folder is mirrored, and each folder holding documents gets its
+    # own pdf/ txt/ json/ inside it.
     assert (out / "pdf" / "scan.pdf").is_file()
     assert (out / "txt" / "scan.txt").is_file()
     assert (out / "json" / "scan.json").is_file()
-    assert (out / "txt" / "sub" / "page.txt").is_file()
+    assert (out / "sub" / "txt" / "page.txt").is_file()
+    assert (out / "sub" / "pdf" / "page.pdf").is_file()
 
     text = (out / "txt" / "scan.txt").read_text()
     assert "MARTINEZ" in text
@@ -288,7 +291,7 @@ def test_a_cancelled_run_skips_its_remaining_pages(sample_folder: Path, tmp_path
 
 @needs_tesseract
 def test_outputs_can_be_kept_beside_each_other(sample_folder: Path, tmp_path: Path):
-    run_blocking(_settings(sample_folder, tmp_path, outputs_grouped_by_type=False))
+    run_blocking(_settings(sample_folder, tmp_path, output_layout="together"))
     out = tmp_path / "output"
     assert (out / "scan.pdf").is_file()
     assert (out / "scan.txt").is_file()
@@ -337,7 +340,7 @@ def test_an_edited_source_is_read_again(sample_folder: Path, tmp_path: Path):
 
     second = run_blocking(_settings(sample_folder, tmp_path))
     assert second.totals.files_skipped == 1
-    assert "RESCANNED" in (tmp_path / "output" / "txt" / "sub" / "page.txt").read_text()
+    assert "RESCANNED" in (tmp_path / "output" / "sub" / "txt" / "page.txt").read_text()
 
 
 @needs_tesseract
@@ -397,7 +400,7 @@ def test_an_interrupted_run_can_be_finished_by_starting_it_again(sample_folder: 
     assert resumed.totals.files_skipped >= 1
     assert resumed.status == "done"
     assert (tmp_path / "output" / "txt" / "scan.txt").is_file()
-    assert (tmp_path / "output" / "txt" / "sub" / "page.txt").is_file()
+    assert (tmp_path / "output" / "sub" / "txt" / "page.txt").is_file()
 
 
 def test_a_run_over_an_empty_folder_finishes_and_says_so(tmp_path: Path):
@@ -407,3 +410,397 @@ def test_a_run_over_an_empty_folder_finishes_and_says_so(tmp_path: Path):
     assert run.status == "done"
     assert run.totals.files_total == 0
     assert (run.run_dir / "manifest.json").is_file()
+
+
+# ------------------------------------------------------ folders inside folders
+
+
+@needs_tesseract
+def test_a_nested_folder_is_mirrored_all_the_way_down(nested_folder: Path, tmp_path: Path):
+    """Every folder that holds documents gets its own pdf/ txt/ json/, however
+    deep it is."""
+    run = run_blocking(_settings(nested_folder, tmp_path))
+    out = tmp_path / "output"
+
+    assert run.status == "done"
+    assert run.totals.files_total == 4
+
+    # Top level.
+    assert (out / "pdf" / "top.pdf").is_file()
+    assert (out / "txt" / "top.txt").is_file()
+    assert (out / "json" / "top.json").is_file()
+
+    # One down.
+    assert (out / "A" / "pdf" / "doc.pdf").is_file()
+    assert (out / "A" / "txt" / "doc.txt").is_file()
+
+    # Two down.
+    assert (out / "A" / "A1" / "pdf" / "copy.pdf").is_file()
+    assert (out / "A" / "A1" / "txt" / "also-top.txt").is_file()
+    assert (out / "A" / "A1" / "json" / "copy.json").is_file()
+
+    # And nothing was collected at the top that belongs further down.
+    assert not (out / "pdf" / "A").exists()
+
+
+# ----------------------------------------------------------------- duplicates
+
+
+@needs_tesseract
+def test_an_identical_document_is_read_once_and_written_twice(
+    nested_folder: Path, tmp_path: Path
+):
+    """Four files, two documents. The copies cost the time of a file copy, not
+    the time of reading them."""
+    run = run_blocking(_settings(nested_folder, tmp_path, duplicates="content"))
+    out = tmp_path / "output"
+
+    assert run.totals.files_copied == 2
+    # Three pages of actual reading: two in the PDF, one in the image.
+    assert run.totals.pages_done == 3
+
+    # Both copies are on disk, and they say the same thing as their originals.
+    assert (out / "A" / "txt" / "doc.txt").read_text() == (
+        out / "A" / "A1" / "txt" / "copy.txt"
+    ).read_text()
+    assert (out / "txt" / "top.txt").read_text() == (
+        out / "A" / "A1" / "txt" / "also-top.txt"
+    ).read_text()
+
+    # The searchable PDF is a real PDF, not a stub.
+    copy = pdfium.PdfDocument(str(out / "A" / "A1" / "pdf" / "copy.pdf"))
+    try:
+        assert len(copy) == 2
+    finally:
+        copy.close()
+
+
+@needs_tesseract
+def test_a_copy_says_which_document_it_came_from(nested_folder: Path, tmp_path: Path):
+    """A file that was never read must not look like one that was.
+
+    Which of an identical pair is the one actually read follows discovery
+    order, so the test asks about the pair rather than about a name.
+    """
+    run = run_blocking(_settings(nested_folder, tmp_path, duplicates="content"))
+    by_relpath = {f.relpath: f for f in run.files}
+
+    copies = [f for f in run.files if f.status == "copied"]
+    assert len(copies) == 2
+    for copy in copies:
+        assert copy.duplicate_of in by_relpath
+        assert by_relpath[copy.duplicate_of].status == "done"
+
+    # Exactly one of each identical pair was read.
+    for pair in (("A/doc.pdf", "A/A1/copy.pdf"), ("top.png", "A/A1/also-top.png")):
+        statuses = sorted(by_relpath[relpath].status for relpath in pair)
+        assert statuses == ["copied", "done"]
+
+    # And the copy's own JSON names itself, not the document it came from.
+    copy = copies[0]
+    written = json.loads(
+        (tmp_path / "output" / copy.outputs["json"]).read_text()
+    )
+    assert written["document"]["relpath"] == copy.relpath
+    assert written["document"]["duplicate_of"] == copy.duplicate_of
+
+
+@needs_tesseract
+def test_a_copy_added_later_is_written_from_the_one_already_read(
+    sample_folder: Path, tmp_path: Path
+):
+    """The copy arrives in a second run, so its twin is in the ledger rather
+    than in this run."""
+    settings = dict(duplicates="content")
+    run_blocking(_settings(sample_folder, tmp_path, **settings))
+    shutil.copyfile(sample_folder / "scan.pdf", sample_folder / "same-scan.pdf")
+
+    second = run_blocking(_settings(sample_folder, tmp_path, **settings))
+    assert second.totals.files_copied == 1
+    assert second.totals.pages_done == 0, "a copy must cost no reading at all"
+    assert (tmp_path / "output" / "txt" / "same-scan.txt").read_text() == (
+        tmp_path / "output" / "txt" / "scan.txt"
+    ).read_text()
+
+
+@needs_tesseract
+def test_two_documents_that_differ_are_both_read(sample_folder: Path, tmp_path: Path):
+    """The guard against the optimisation: same size, different bytes."""
+    text_page(["A DIFFERENT PAGE ENTIRELY", "Case No. A-00-123456-C"]).save(
+        sample_folder / "other.png"
+    )
+    run = run_blocking(_settings(sample_folder, tmp_path))
+    assert run.totals.files_copied == 0
+    assert run.totals.pages_done == 4
+
+
+# -------------------------------------------------------------------- resuming
+
+
+@needs_tesseract
+def test_pages_survive_a_run_stopped_part_way_through_a_document(
+    long_document: Path, tmp_path: Path
+):
+    """The failure this exists for: an hour of reading held in memory and lost
+    when the run was stopped."""
+    run = Run(_settings(long_document, tmp_path, workers=1))
+    run.start()
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline and run.totals.pages_done < 3:
+        time.sleep(0.05)
+    read_before_stopping = run.totals.pages_done
+    run.cancel()
+    run.join(timeout=120)
+
+    assert read_before_stopping >= 3, "the run never got going"
+    assert run.status == "cancelled"
+
+    # Those pages are on disk, not in a process that has gone.
+    cached = list((tmp_path / "output" / "_cache").rglob("p*.json"))
+    assert len(cached) >= read_before_stopping
+
+    resumed = run_blocking(_settings(long_document, tmp_path))
+    assert resumed.status == "done"
+    assert resumed.totals.pages_resumed >= read_before_stopping
+    # Only what was still missing was read again.
+    assert resumed.totals.pages_done == 8 - resumed.totals.pages_resumed
+
+    text = (tmp_path / "output" / "txt" / "record.txt").read_text()
+    assert "PAGE 1 OF THE RECORD" in text
+    assert "PAGE 8 OF THE RECORD" in text
+    assert text.count("----- page") == 8
+
+
+@needs_tesseract
+def test_a_finished_document_leaves_no_cache_behind(sample_folder: Path, tmp_path: Path):
+    """The cache is unfinished work. Finished work must not sit in it."""
+    run_blocking(_settings(sample_folder, tmp_path))
+    assert not (tmp_path / "output" / "_cache").exists()
+
+
+@needs_tesseract
+def test_changing_the_resolution_does_not_resume_onto_the_old_pages(
+    long_document: Path, tmp_path: Path
+):
+    """Pages read at one resolution are not the pages another run would read."""
+    run = Run(_settings(long_document, tmp_path, workers=1, dpi=150))
+    run.start()
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline and run.totals.pages_done < 2:
+        time.sleep(0.05)
+    run.cancel()
+    run.join(timeout=120)
+
+    second = run_blocking(_settings(long_document, tmp_path, dpi=200))
+    assert second.totals.pages_resumed == 0
+    assert second.totals.pages_done == 8
+
+
+@needs_tesseract
+def test_a_copy_opens_in_the_viewer_with_its_page_pictures(
+    nested_folder: Path, tmp_path: Path
+):
+    """A copied document has no previews of its own — it points at the ones
+    belonging to the document it is identical to, which are the same pictures.
+    Without this a copy opens as a wall of text with nothing to check it
+    against."""
+    run = run_blocking(_settings(nested_folder, tmp_path, duplicates="content"))
+    copy_index = next(i for i, f in enumerate(run.files) if f.status == "copied")
+
+    document = load_document(tmp_path / "output", run.run_id, copy_index)
+    assert document is not None
+    assert document["pages"], "a copy must have pages"
+    for page in document["pages"]:
+        assert page["preview"], "every page needs a picture"
+        assert (tmp_path / "output" / page["preview"]).is_file()
+
+
+@needs_tesseract
+def test_a_copy_of_a_document_that_never_arrived_says_so(
+    nested_folder: Path, tmp_path: Path, monkeypatch
+):
+    """A row saying "copied" with nothing on disk would be worse than a row
+    saying what actually happened."""
+    from ocrtool import runner as runner_module
+
+    real = runner_module.write_searchable_pdf
+
+    def explode(dest, **kwargs):
+        if dest.stem in {"doc", "copy"}:
+            raise RuntimeError("no pdf for you")
+        return real(dest, **kwargs)
+
+    monkeypatch.setattr(runner_module, "write_searchable_pdf", explode)
+
+    run = run_blocking(_settings(nested_folder, tmp_path, duplicates="content"))
+    pdf_pair = [f for f in run.files if f.relpath.endswith((".pdf",))]
+    assert {f.status for f in pdf_pair} == {"failed"}
+    assert all(f.error for f in pdf_pair)
+    # The count must not still claim a copy that was never written.
+    assert run.totals.files_copied == 1
+
+
+# ------------------------------------------------- what counts as the same document
+
+
+@needs_tesseract
+def test_by_default_a_copy_under_a_different_name_is_read_on_its_own(
+    nested_folder: Path, tmp_path: Path
+):
+    """The default rule needs the names to match too, so four differently
+    named files are four documents even when their bytes are identical."""
+    run = run_blocking(_settings(nested_folder, tmp_path))
+    assert run.totals.files_copied == 0
+    assert run.totals.pages_done == 6  # two 2-page PDFs, two 1-page images
+
+
+@needs_tesseract
+def test_the_same_name_in_two_folders_is_read_once(tmp_path: Path):
+    folder = tmp_path / "in"
+    (folder / "A").mkdir(parents=True)
+    (folder / "B").mkdir(parents=True)
+    text_page(["EXHIBIT 32 - POLICY MANUAL"]).save(folder / "A" / "manual.png")
+    shutil.copyfile(folder / "A" / "manual.png", folder / "B" / "manual.png")
+
+    run = run_blocking(_settings(folder, tmp_path))
+    assert run.totals.files_copied == 1
+    assert run.totals.pages_done == 1
+    assert (tmp_path / "output" / "A" / "txt" / "manual.txt").read_text() == (
+        tmp_path / "output" / "B" / "txt" / "manual.txt"
+    ).read_text()
+
+
+@needs_tesseract
+def test_the_same_name_with_different_contents_is_never_copied(tmp_path: Path):
+    """The rule that stops a name-based match from putting one document's text
+    under another document's name. `scan.pdf` is in every folder anyone has."""
+    folder = tmp_path / "in"
+    (folder / "A").mkdir(parents=True)
+    (folder / "B").mkdir(parents=True)
+    text_page(["EXHIBIT 32 - POLICY MANUAL"]).save(folder / "A" / "scan.png")
+    text_page(["EXHIBIT 41 - RADIOLOGY REPORT"]).save(folder / "B" / "scan.png")
+
+    run = run_blocking(_settings(folder, tmp_path))
+    assert run.totals.files_copied == 0
+    assert run.totals.pages_done == 2
+    assert "POLICY" in (tmp_path / "output" / "A" / "txt" / "scan.txt").read_text()
+    assert "RADIOLOGY" in (tmp_path / "output" / "B" / "txt" / "scan.txt").read_text()
+
+
+@needs_tesseract
+def test_duplicate_matching_can_be_turned_off(nested_folder: Path, tmp_path: Path):
+    run = run_blocking(_settings(nested_folder, tmp_path, duplicates="off"))
+    assert run.totals.files_copied == 0
+    assert run.totals.pages_done == 6
+
+
+@needs_tesseract
+def test_identical_documents_do_not_share_a_cache_when_names_must_match(
+    nested_folder: Path, tmp_path: Path
+):
+    """Two same-content documents read separately must not write over each
+    other's stored pages, or the first to finish would delete the page PDFs
+    the second still needs."""
+    run = run_blocking(_settings(nested_folder, tmp_path))
+    assert run.status == "done"
+    assert all(f.status == "done" for f in run.files), [
+        (f.relpath, f.status, f.error) for f in run.files
+    ]
+    out = tmp_path / "output"
+    for relpath in ("A/pdf/doc.pdf", "A/A1/pdf/copy.pdf"):
+        pdf = pdfium.PdfDocument(str(out / relpath))
+        try:
+            assert len(pdf) == 2, f"{relpath} lost a page"
+        finally:
+            pdf.close()
+
+
+@needs_tesseract
+def test_the_same_name_arriving_in_a_later_run_is_copied(sample_folder: Path, tmp_path: Path):
+    """The default rule, across runs: the twin is in the ledger, not this run."""
+    run_blocking(_settings(sample_folder, tmp_path))
+    (sample_folder / "later").mkdir()
+    shutil.copyfile(sample_folder / "scan.pdf", sample_folder / "later" / "scan.pdf")
+
+    second = run_blocking(_settings(sample_folder, tmp_path))
+    assert second.totals.files_copied == 1
+    assert second.totals.pages_done == 0, "a copy must cost no reading at all"
+    assert (tmp_path / "output" / "later" / "txt" / "scan.txt").read_text() == (
+        tmp_path / "output" / "txt" / "scan.txt"
+    ).read_text()
+
+
+# ---------------------------------------------------- keeping the tool's folders apart
+
+
+@needs_tesseract
+def test_the_output_folder_can_hold_nothing_but_results(sample_folder: Path, tmp_path: Path):
+    """With a work folder chosen, the output folder is the results and nothing
+    else — no _runs/, no _previews/, no _cache/."""
+    work = tmp_path / "work"
+    run = run_blocking(_settings(sample_folder, tmp_path, work_dir=str(work)))
+    out = tmp_path / "output"
+
+    assert run.status == "done"
+    assert sorted(p.name for p in out.iterdir()) == ["json", "pdf", "sub", "txt"]
+    assert not (out / "_runs").exists()
+    assert not (out / "_previews").exists()
+
+    # And the bookkeeping is all in the work folder.
+    assert (work / "_runs" / run.run_id / "manifest.json").is_file()
+    assert (work / "_runs" / "completed.json").is_file()
+    assert (work / "_previews" / "scan.pdf" / "p0001.jpg").is_file()
+
+    # The results themselves are still where they belong.
+    assert (out / "pdf" / "scan.pdf").is_file()
+    assert (out / "sub" / "txt" / "page.txt").is_file()
+
+
+@needs_tesseract
+def test_a_separate_work_folder_still_skips_what_it_has_read(
+    sample_folder: Path, tmp_path: Path
+):
+    """The ledger lives in the work folder but records paths in the output
+    folder. Getting that pair wrong would make it re-read everything."""
+    work = tmp_path / "work"
+    run_blocking(_settings(sample_folder, tmp_path, work_dir=str(work)))
+    second = run_blocking(_settings(sample_folder, tmp_path, work_dir=str(work)))
+    assert second.totals.files_skipped == 2
+    assert second.totals.pages_done == 0
+
+
+@needs_tesseract
+def test_a_deleted_output_is_noticed_from_a_separate_work_folder(
+    sample_folder: Path, tmp_path: Path
+):
+    """The check that proves the ledger is looking in the output folder for
+    the outputs, not in the work folder."""
+    work = tmp_path / "work"
+    run_blocking(_settings(sample_folder, tmp_path, work_dir=str(work)))
+    (tmp_path / "output" / "txt" / "scan.txt").unlink()
+
+    second = run_blocking(_settings(sample_folder, tmp_path, work_dir=str(work)))
+    assert second.totals.files_skipped == 1
+    assert (tmp_path / "output" / "txt" / "scan.txt").is_file()
+
+
+@needs_tesseract
+def test_a_stopped_run_resumes_from_a_separate_work_folder(
+    long_document: Path, tmp_path: Path
+):
+    work = tmp_path / "work"
+    run = Run(_settings(long_document, tmp_path, workers=1, work_dir=str(work)))
+    run.start()
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline and run.totals.pages_done < 3:
+        time.sleep(0.05)
+    run.cancel()
+    run.join(timeout=120)
+
+    assert (work / "_cache").is_dir()
+    assert not (tmp_path / "output" / "_cache").exists()
+
+    resumed = run_blocking(_settings(long_document, tmp_path, work_dir=str(work)))
+    assert resumed.status == "done"
+    assert resumed.totals.pages_resumed >= 3
+    assert (tmp_path / "output" / "txt" / "record.txt").read_text().count("----- page") == 8

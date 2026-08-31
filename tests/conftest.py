@@ -6,6 +6,7 @@ must never be the place someone's scanned records end up by accident.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -92,4 +93,37 @@ def sample_folder(tmp_path: Path) -> Path:
 
     (folder / "notes.txt").write_text("not a document this tool reads")
     (folder / ".hidden.pdf").write_bytes(b"%PDF-1.4 not really")
+    return folder
+
+
+@pytest.fixture
+def nested_folder(tmp_path: Path) -> Path:
+    """A folder shaped the way a real case folder is: documents at several
+    depths, and the same document appearing more than once under different
+    names — which is the ordinary case, not the exotic one.
+
+    Four files, two documents: `A/doc.pdf` and `A/A1/copy.pdf` are byte-for-byte
+    the same, and so are `top.png` and `A/A1/also-top.png`.
+    """
+    folder = tmp_path / "nested"
+    (folder / "A" / "A1").mkdir(parents=True)
+
+    text_page().save(folder / "top.png")
+    first = text_page(["EXHIBIT 32 - POLICY MANUAL", "Section 1. Scope"])
+    second = text_page(["Section 2. Reporting", "Amount billed: $4,238.75"])
+    first.save(folder / "A" / "doc.pdf", save_all=True, append_images=[second], resolution=150)
+
+    shutil.copyfile(folder / "A" / "doc.pdf", folder / "A" / "A1" / "copy.pdf")
+    shutil.copyfile(folder / "top.png", folder / "A" / "A1" / "also-top.png")
+    return folder
+
+
+@pytest.fixture
+def long_document(tmp_path: Path) -> Path:
+    """One document with enough pages that a run can be stopped part-way
+    through it rather than between documents."""
+    folder = tmp_path / "long"
+    folder.mkdir()
+    pages = [text_page([f"PAGE {n} OF THE RECORD", "Case No. A-00-123456-C"]) for n in range(1, 9)]
+    pages[0].save(folder / "record.pdf", save_all=True, append_images=pages[1:], resolution=150)
     return folder

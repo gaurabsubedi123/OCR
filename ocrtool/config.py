@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .outputs import DEFAULT_LAYOUT, LAYOUTS
+
 log = logging.getLogger(__name__)
 
 # Tesseract is trained at roughly 300 dpi. Below ~200 it degrades sharply;
@@ -69,9 +71,15 @@ SUPPORTED_SUFFIXES = {
     ".gif",
 }
 
+# How two documents are judged to be the same document. See Settings.duplicates.
+DUPLICATE_RULES = ("name", "content", "off")
+DEFAULT_DUPLICATES = "name"
+
 # Directories the tool writes itself. Never treated as input, so pointing the
-# tool at its own output folder cannot start a feedback loop.
-RESERVED_DIRS = {"_runs", "_previews", "_uploads"}
+# tool at its own output folder cannot start a feedback loop. `_cache` holds
+# per-page PDFs, which are exactly the kind of thing that would otherwise be
+# discovered and read back in.
+RESERVED_DIRS = {"_runs", "_previews", "_uploads", "_cache"}
 
 
 def state_dir() -> Path:
@@ -93,9 +101,13 @@ def default_folders() -> dict[str, str]:
 
     Resolved in this order, most specific first:
 
-      1. OCRTOOL_INPUT_DIR / OCRTOOL_OUTPUT_DIR in the environment
-      2. input_dir / output_dir in ~/.ocrtool/config.json
-      3. ~/ocr-input and ~/ocr-output
+      1. OCRTOOL_INPUT_DIR / OCRTOOL_OUTPUT_DIR / OCRTOOL_WORK_DIR
+      2. input_dir / output_dir / work_dir in ~/.ocrtool/config.json
+      3. ~/ocr-input and ~/ocr-output, and the output folder for the work
+
+    The work folder is the odd one out: an empty string means "keep the
+    tool's own folders with the results", which is the default and cannot be
+    expressed as a path.
 
     Typing an absolute path every time is exactly the kind of friction that
     makes a tool annoying to use daily, and on WSL the path is long and easy to
@@ -104,19 +116,28 @@ def default_folders() -> dict[str, str]:
     folders = {
         "input": str(Path.home() / "ocr-input"),
         "output": str(Path.home() / "ocr-output"),
+        "work": "",
     }
 
     path = config_path()
     if path.is_file():
         try:
             stored = json.loads(path.read_text(encoding="utf-8"))
-            for key, stored_key in (("input", "input_dir"), ("output", "output_dir")):
+            for key, stored_key in (
+                ("input", "input_dir"),
+                ("output", "output_dir"),
+                ("work", "work_dir"),
+            ):
                 if stored.get(stored_key):
                     folders[key] = str(Path(stored[stored_key]).expanduser())
         except (OSError, json.JSONDecodeError, TypeError) as exc:
             log.warning("could not read %s: %s", path, exc)
 
-    for key, variable in (("input", "OCRTOOL_INPUT_DIR"), ("output", "OCRTOOL_OUTPUT_DIR")):
+    for key, variable in (
+        ("input", "OCRTOOL_INPUT_DIR"),
+        ("output", "OCRTOOL_OUTPUT_DIR"),
+        ("work", "OCRTOOL_WORK_DIR"),
+    ):
         value = os.environ.get(variable)
         if value:
             folders[key] = str(Path(value).expanduser())
@@ -124,8 +145,17 @@ def default_folders() -> dict[str, str]:
     return folders
 
 
-def save_default_folders(*, input_dir: str | None = None, output_dir: str | None = None) -> dict[str, str]:
-    """Remember these folders for next time, and make them if they are missing."""
+def save_default_folders(
+    *,
+    input_dir: str | None = None,
+    output_dir: str | None = None,
+    work_dir: str | None = None,
+) -> dict[str, str]:
+    """Remember these folders for next time, and make them if they are missing.
+
+    A work folder given as an empty string is a decision, not a missing value:
+    it puts the tool's own folders back with the results.
+    """
     path = config_path()
     stored: dict[str, Any] = {}
     if path.is_file():
@@ -134,7 +164,14 @@ def save_default_folders(*, input_dir: str | None = None, output_dir: str | None
         except (OSError, json.JSONDecodeError):
             stored = {}
 
-    for key, value in (("input_dir", input_dir), ("output_dir", output_dir)):
+    if work_dir == "":
+        stored.pop("work_dir", None)
+
+    for key, value in (
+        ("input_dir", input_dir),
+        ("output_dir", output_dir),
+        ("work_dir", work_dir),
+    ):
         if value:
             folder = Path(value).expanduser()
             stored[key] = str(folder)
@@ -166,6 +203,11 @@ class Settings:
 
     input_dir: str
     output_dir: str
+    # Where the tool's own bookkeeping goes: _runs/, _previews/ and _cache/.
+    # Empty means "the output folder", which is where it has always gone.
+    # Pointing this somewhere else leaves the output folder holding nothing but
+    # your results — the pdf/ txt/ json/ tree and nothing beside it.
+    work_dir: str = ""
     dpi: int = DEFAULT_DPI
     lang: str = DEFAULT_LANG
     psm: int = DEFAULT_PSM
@@ -178,16 +220,31 @@ class Settings:
     write_json: bool = True
     include_word_boxes: bool = True
     write_previews: bool = True
-    # Put each kind of output in its own folder — output/pdf/, output/txt/,
-    # output/json/ — each keeping the input's subfolder structure inside it.
-    # Off puts a document's three files beside each other instead.
-    outputs_grouped_by_type: bool = True
+    # Where the three kinds of output go. See ocrtool.outputs for the shapes.
+    #   by-folder  the input tree, with pdf/ txt/ json/ inside each folder that
+    #              holds documents — results stay next to where they came from
+    #   by-type    one pdf/, txt/ and json/ at the top, input tree inside each
+    #   together   the input tree, a document's three files side by side
+    output_layout: str = DEFAULT_LAYOUT
     # Leave a document alone if this output folder already holds its results,
     # the source has not changed, and it was read with these same settings.
     skip_already_done: bool = True
+    # When two documents count as the same document, so one is read and the
+    # other's files are written from it:
+    #   name     same file name and same contents (the default)
+    #   content  same contents, whatever either one is called
+    #   off      never; every file is read on its own
+    # Contents are checked in every mode. Two files that share a name but not
+    # their bytes are different documents, and writing one from the other
+    # would put one document's text under another document's name.
+    duplicates: str = DEFAULT_DUPLICATES
     # Put the original page picture back into the searchable PDF instead of the
     # greyscale copy OCR read. Truer to the document, and a larger file.
     pdf_keeps_source_image: bool = True
+    # Put the words back where they were on the page in the .txt, using their
+    # boxes, instead of listing them flush left. Columns, tables and forms stay
+    # readable; off gives the plain stream of lines tesseract returns.
+    txt_keeps_layout: bool = True
     min_confidence: float = DEFAULT_MIN_CONFIDENCE
     recursive: bool = True
 
@@ -197,6 +254,16 @@ class Settings:
         self.dpi = max(72, min(600, int(self.dpi)))
         self.psm = max(0, min(13, int(self.psm)))
         self.workers = max(1, min(32, int(self.workers)))
+        if self.duplicates not in DUPLICATE_RULES:
+            log.warning(
+                "unknown duplicate rule %r, using %s", self.duplicates, DEFAULT_DUPLICATES
+            )
+            self.duplicates = DEFAULT_DUPLICATES
+        if self.output_layout not in LAYOUTS:
+            log.warning(
+                "unknown output layout %r, using %s", self.output_layout, DEFAULT_LAYOUT
+            )
+            self.output_layout = DEFAULT_LAYOUT
 
     @property
     def input_path(self) -> Path:
@@ -206,10 +273,27 @@ class Settings:
     def output_path(self) -> Path:
         return Path(self.output_dir).expanduser().resolve()
 
+    @property
+    def work_path(self) -> Path:
+        """Where `_runs/`, `_previews/` and `_cache/` live."""
+        if not self.work_dir:
+            return self.output_path
+        return Path(self.work_dir).expanduser().resolve()
+
+    @property
+    def work_is_separate(self) -> bool:
+        return self.work_path != self.output_path
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Settings":
+        data = dict(data)
+        # Runs recorded before the layout became a choice stored a boolean.
+        # Their manifests still have to load, so the old key is translated
+        # rather than ignored.
+        if "output_layout" not in data and "outputs_grouped_by_type" in data:
+            data["output_layout"] = "by-type" if data["outputs_grouped_by_type"] else "together"
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         return cls(**{k: v for k, v in data.items() if k in known})

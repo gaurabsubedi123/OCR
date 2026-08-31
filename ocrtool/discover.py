@@ -12,6 +12,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from .cache import file_sha256
 from .config import RESERVED_DIRS, SUPPORTED_SUFFIXES
 
 log = logging.getLogger(__name__)
@@ -30,6 +31,10 @@ class Discovered:
     # Size and modification time together are how a later run decides whether
     # this is still the same file it read before.
     modified: float = -1.0
+    # The content hash. Two documents with the same one are the same document,
+    # whatever they are called and wherever they sit, so it is what identifies
+    # a document's stored pages and what catches a copy of one already read.
+    sha256: str = ""
 
 
 def find_documents(root: Path, *, recursive: bool = True) -> list[Discovered]:
@@ -74,7 +79,18 @@ def _describe(path: Path, root: Path) -> Discovered:
 
     if pages == 0:
         return Discovered(path, relpath, size, 0, error="no pages found in file", modified=modified)
-    return Discovered(path, relpath, size, pages, modified=modified)
+
+    # Reading the file through once costs a fraction of a second per hundred
+    # megabytes, against minutes per hundred pages of OCR. A document whose
+    # hash cannot be taken simply loses the ability to resume and to be
+    # recognised as a copy; it is still read normally.
+    try:
+        digest = file_sha256(path)
+    except OSError as exc:
+        log.warning("could not hash %s: %s", path, exc)
+        digest = ""
+
+    return Discovered(path, relpath, size, pages, modified=modified, sha256=digest)
 
 
 def count_pages(path: Path) -> int:

@@ -66,6 +66,7 @@ class Registry:
             "run_id": run.run_id,
             "input_dir": str(run.settings.input_path),
             "output_dir": str(run.settings.output_path),
+            "work_dir": str(run.settings.work_path),
             "created_at": run.created_at,
         }
         with self._lock:
@@ -95,8 +96,8 @@ class Registry:
             run_id = entry.get("run_id", "")
             if run_id in seen:
                 continue
-            output_dir = Path(entry.get("output_dir", ""))
-            manifest = load_run(output_dir, run_id) if output_dir.is_dir() else None
+            work_dir = Path(entry.get("work_dir") or entry.get("output_dir", ""))
+            manifest = load_run(work_dir, run_id) if work_dir.is_dir() else None
             if manifest is None:
                 continue
             manifest["live"] = False
@@ -107,17 +108,29 @@ class Registry:
         return out[:limit]
 
     def find_output_dir(self, run_id: str) -> Path | None:
-        """Which output folder a run belongs to — the live run knows, and a
-        finished one is looked up in the recents file."""
+        """Which output folder a run wrote its results into — the live run
+        knows, and a finished one is looked up in the recents file."""
+        return self._find_dir(run_id, "output_dir")
+
+    def find_work_dir(self, run_id: str) -> Path | None:
+        """Which folder holds a run's `_runs/` and `_previews/`.
+
+        The same as the output folder unless a separate work folder was chosen,
+        and runs recorded before that was possible have only the one — so the
+        output folder is the fallback rather than a failure.
+        """
+        return self._find_dir(run_id, "work_dir") or self._find_dir(run_id, "output_dir")
+
+    def _find_dir(self, run_id: str, key: str) -> Path | None:
         live = self.get(run_id)
         if live is not None:
-            return live.settings.output_path
+            return live.settings.work_path if key == "work_dir" else live.settings.output_path
         for entry in self._read_recent():
             if entry.get("run_id") == run_id:
-                path = Path(entry.get("output_dir", ""))
-                if path.is_dir():
+                path = Path(entry.get(key) or "")
+                if str(path) and path.is_dir():
                     return path
         return None
 
-    def runs_in(self, output_dir: Path) -> list[dict[str, Any]]:
-        return list_runs(output_dir)
+    def runs_in(self, work_dir: Path) -> list[dict[str, Any]]:
+        return list_runs(work_dir)

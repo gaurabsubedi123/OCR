@@ -21,18 +21,18 @@ import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 log = logging.getLogger(__name__)
 
 LEDGER_NAME = "completed.json"
 
-# The settings that change what a page's text or its PDF actually is. A change
-# to any of them means the stored result is not the result this run would
-# produce, so the document is read again. Deliberately excluded:
-# min_confidence, which only decides which pages get flagged, and workers,
-# which changes nothing about the outcome.
-RECIPE_KEYS = (
+# The settings that change what a *page* actually is — its text, and the
+# one-page PDF stored beside it. These key the stored pages: change any of
+# them and pages read under the old setting are not this run's pages.
+# Deliberately excluded: min_confidence, which only decides which pages get
+# flagged, and workers, which changes nothing about the outcome.
+PAGE_RECIPE_KEYS = (
     "dpi",
     "lang",
     "psm",
@@ -42,9 +42,20 @@ RECIPE_KEYS = (
     "pdf_keeps_source_image",
 )
 
+# Everything above, plus the settings that change the *files* written from
+# those pages. A document is read again when any of these differ, because the
+# file on disk would not be the file this run would write. Kept separate from
+# the page keys so that changing how the text is laid out rewrites the outputs
+# without throwing away pages that are perfectly good.
+RECIPE_KEYS = PAGE_RECIPE_KEYS + ("txt_keeps_layout",)
+
 
 def recipe(settings: dict[str, Any]) -> dict[str, Any]:
     return {key: settings.get(key) for key in RECIPE_KEYS}
+
+
+def page_recipe(settings: dict[str, Any]) -> dict[str, Any]:
+    return {key: settings.get(key) for key in PAGE_RECIPE_KEYS}
 
 
 @dataclass
@@ -57,6 +68,9 @@ class LedgerEntry:
     recipe: dict[str, Any]
     run_id: str
     pages_json: str | None = None
+    # The source document's content hash. Empty on entries written before the
+    # ledger recorded it, and on ones backfilled from an old manifest.
+    sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +81,7 @@ class LedgerEntry:
             "recipe": self.recipe,
             "run_id": self.run_id,
             "pages_json": self.pages_json,
+            "sha256": self.sha256,
         }
 
     @classmethod
@@ -80,15 +95,20 @@ class LedgerEntry:
             recipe=dict(data.get("recipe", {})),
             run_id=str(data.get("run_id", "")),
             pages_json=data.get("pages_json"),
+            sha256=str(data.get("sha256", "")),
         )
 
 
 class Ledger:
     """The record of what has been read into one output folder."""
 
-    def __init__(self, output_dir: Path):
-        self.output_dir = Path(output_dir)
-        self.path = self.output_dir / "_runs" / LEDGER_NAME
+    def __init__(self, work_dir: Path, output_dir: Path | None = None):
+        # The ledger lives with the rest of the bookkeeping, but the output
+        # paths it records are relative to the folder the results went into.
+        # The two are the same folder unless a work folder was chosen.
+        self.work_dir = Path(work_dir)
+        self.output_dir = Path(output_dir) if output_dir is not None else self.work_dir
+        self.path = self.work_dir / "_runs" / LEDGER_NAME
         self._entries: dict[str, LedgerEntry] = {}
         self._lock = threading.Lock()
         self._load()
@@ -116,7 +136,7 @@ class Ledger:
         matched on size alone — a slightly weaker check, applied only to runs
         that predate the ledger.
         """
-        runs_dir = self.output_dir / "_runs"
+        runs_dir = self.work_dir / "_runs"
         if not runs_dir.is_dir():
             return
 
@@ -179,9 +199,46 @@ class Ledger:
         for kind, path in wanted.items():
             if kind not in entry.outputs or not path.is_file():
                 return None
-        if entry.pages_json and not (self.output_dir / entry.pages_json).is_file():
+        if entry.pages_json and not (self.work_dir / entry.pages_json).is_file():
             return None
         return entry
+
+    def twin_of(
+        self,
+        sha256: str,
+        *,
+        relpath: str,
+        settings: dict[str, Any],
+        wanted: Iterable[str],
+        same_name_only: bool = False,
+    ) -> LedgerEntry | None:
+        """A document already read into this folder with these exact bytes.
+
+        The same exhibit routinely appears twice in a case folder under two
+        numbers, and reading it twice produces two identical files at the cost
+        of two lots of time. Matching on content rather than on name is what
+        makes that free: same bytes and same recipe means the same result, so
+        the finished one can simply be copied.
+
+        Only offered when the twin still has every output this run wants, and
+        those files are still on disk.
+        """
+        if not sha256:
+            return None
+        wanted = set(wanted)
+        name = Path(relpath).name
+        for entry in self._entries.values():
+            if entry.relpath == relpath or entry.sha256 != sha256:
+                continue
+            if same_name_only and Path(entry.relpath).name != name:
+                continue
+            if entry.recipe != recipe(settings):
+                continue
+            if not wanted.issubset(entry.outputs):
+                continue
+            if all((self.output_dir / entry.outputs[kind]).is_file() for kind in wanted):
+                return entry
+        return None
 
     def __len__(self) -> int:
         return len(self._entries)

@@ -19,7 +19,14 @@ from ocrtool.config import (
 from ocrtool.ledger import Ledger, LedgerEntry, recipe
 from ocrtool.discover import find_documents
 from ocrtool.models import FileResult, PageResult, Word
-from ocrtool.outputs import output_paths, write_json, write_pages_csv, write_text
+from ocrtool.cache import document_key
+from ocrtool.outputs import (
+    laid_out_text,
+    output_paths,
+    write_json,
+    write_pages_csv,
+    write_text,
+)
 from ocrtool.pipeline import _flag
 from ocrtool.preprocess import _estimate_skew, preprocess
 from ocrtool.render import _fit, render_page
@@ -62,13 +69,29 @@ def test_default_folders_fall_back_to_the_home_directory(tmp_path, monkeypatch):
 def test_saved_folders_are_remembered_and_created(tmp_path, monkeypatch):
     monkeypatch.delenv("OCRTOOL_INPUT_DIR", raising=False)
     monkeypatch.delenv("OCRTOOL_OUTPUT_DIR", raising=False)
+    monkeypatch.delenv("OCRTOOL_WORK_DIR", raising=False)
     wanted_in, wanted_out = tmp_path / "scans", tmp_path / "results"
 
     folders = save_default_folders(input_dir=str(wanted_in), output_dir=str(wanted_out))
 
-    assert folders == {"input": str(wanted_in), "output": str(wanted_out)}
+    assert folders == {"input": str(wanted_in), "output": str(wanted_out), "work": ""}
     assert wanted_in.is_dir() and wanted_out.is_dir(), "the folders should exist afterwards"
     assert default_folders()["input"] == str(wanted_in), "and survive into the next call"
+
+
+def test_a_work_folder_is_remembered_and_can_be_put_back(tmp_path, monkeypatch):
+    """Empty means "keep the tool's folders with the results", which is a
+    decision rather than a missing value — so it has to be storable."""
+    monkeypatch.delenv("OCRTOOL_WORK_DIR", raising=False)
+    wanted = tmp_path / "bookkeeping"
+
+    folders = save_default_folders(work_dir=str(wanted))
+    assert folders["work"] == str(wanted)
+    assert wanted.is_dir()
+    assert default_folders()["work"] == str(wanted)
+
+    assert save_default_folders(work_dir="")["work"] == ""
+    assert default_folders()["work"] == ""
 
 
 def test_the_environment_wins_over_the_saved_folders(tmp_path, monkeypatch):
@@ -342,21 +365,42 @@ def _result() -> FileResult:
         PageResult(
             page_no=2, source="ocr", text="page two", confidence=61.0, duration_ms=900,
             needs_review=True, review_reason="mean confidence 61 below 70",
-            words=[Word("page", 1, 2, 3, 4, 61.0)],
+            words=[Word("page", 0, 0, 40, 18, 61.0), Word("two", 50, 0, 80, 18, 61.0)],
         ),
     ]
     return result
 
 
-def test_outputs_are_sorted_by_type_and_keep_the_input_structure():
-    paths = output_paths(Path("/out"), "Ex 13/scan.pdf")
+def test_outputs_land_in_the_folder_the_document_came_from():
+    """The default: walk to where the document was and its results are there."""
+    paths = output_paths(Path("/out"), "Medical/Hemet/13.pdf")
+    assert paths["pdf"] == Path("/out/Medical/Hemet/pdf/13.pdf")
+    assert paths["txt"] == Path("/out/Medical/Hemet/txt/13.txt")
+    assert paths["json"] == Path("/out/Medical/Hemet/json/13.json")
+
+
+def test_a_document_at_the_top_gets_its_folders_at_the_top():
+    paths = output_paths(Path("/out"), "loose.pdf")
+    assert paths["pdf"] == Path("/out/pdf/loose.pdf")
+    assert paths["txt"] == Path("/out/txt/loose.txt")
+
+
+def test_every_depth_gets_its_own_three_folders():
+    """A folder four deep is no different from one at the top."""
+    deep = output_paths(Path("/out"), "a/b/c/d/scan.pdf")
+    assert deep["pdf"] == Path("/out/a/b/c/d/pdf/scan.pdf")
+    assert deep["json"] == Path("/out/a/b/c/d/json/scan.json")
+
+
+def test_outputs_can_be_sorted_by_type_instead():
+    paths = output_paths(Path("/out"), "Ex 13/scan.pdf", layout="by-type")
     assert paths["pdf"] == Path("/out/pdf/Ex 13/scan.pdf")
     assert paths["txt"] == Path("/out/txt/Ex 13/scan.txt")
     assert paths["json"] == Path("/out/json/Ex 13/scan.json")
 
 
 def test_outputs_can_be_kept_together_instead():
-    paths = output_paths(Path("/out"), "Ex 13/scan.pdf", grouped=False)
+    paths = output_paths(Path("/out"), "Ex 13/scan.pdf", layout="together")
     assert paths["pdf"] == Path("/out/Ex 13/scan.pdf")
     assert paths["txt"] == Path("/out/Ex 13/scan.txt")
     assert paths["json"] == Path("/out/Ex 13/scan.json")
@@ -404,3 +448,74 @@ def test_file_summary_counts_what_the_ui_shows():
     assert summary["flagged_pages"] == [2]
     assert summary["mean_confidence"] == 61.0
     assert summary["chars"] == len("page one") + len("page two")
+
+
+# --------------------------------------------------------------- laid-out text
+
+
+def _row(y: float, *placed: tuple[float, str]) -> list[Word]:
+    """Words on one line, each at a given x, sized like 10px characters."""
+    return [Word(text, x, y, x + 10 * len(text), y + 18, 90.0) for x, text in placed]
+
+
+def test_the_text_keeps_the_columns_the_page_had():
+    """Tesseract returns lines flush left, which turns a two-column bill into a
+    list of numbers with nothing to say which is which. The boxes know better."""
+    page = PageResult(page_no=1, source="ocr", text="Consultation 240.00\nX-ray 615.50")
+    page.words = _row(0, (0, "Consultation"), (400, "240.00")) + _row(
+        40, (0, "X-ray"), (400, "615.50")
+    )
+
+    lines = [line for line in laid_out_text(page).splitlines() if line.strip()]
+    assert lines[0].startswith("Consultation")
+    assert lines[1].startswith("X-ray")
+    # The amounts line up with each other, where they lined up on the page.
+    assert lines[0].index("240.00") == lines[1].index("615.50")
+
+
+def test_a_page_with_no_boxes_keeps_its_plain_text():
+    """A page taken from a PDF's own text layer has no word boxes, and must
+    still come out as itself."""
+    page = PageResult(page_no=1, source="text-layer", text="already perfect text")
+    assert laid_out_text(page) == "already perfect text"
+
+
+def test_blank_lines_on_the_page_survive():
+    page = PageResult(page_no=1, source="ocr", text="TITLE\nbody")
+    page.words = _row(0, (0, "TITLE")) + _row(200, (0, "body"))
+    assert "" in laid_out_text(page).splitlines()[1:-1]
+
+
+def test_words_never_run_into_each_other():
+    """Two words whose boxes nearly touch must still be two words."""
+    page = PageResult(page_no=1, source="ocr", text="Case No")
+    page.words = _row(0, (0, "Case"), (41, "No"))
+    assert "CaseNo" not in laid_out_text(page)
+
+
+def test_a_slightly_skewed_line_stays_one_line():
+    """A scan is never perfectly straight; a line that drifts a few pixels down
+    across the page is still a line."""
+    page = PageResult(page_no=1, source="ocr", text="one two three")
+    page.words = [
+        Word("one", 0, 0, 30, 18, 90.0),
+        Word("two", 100, 4, 130, 22, 90.0),
+        Word("three", 200, 8, 250, 26, 90.0),
+    ]
+    assert len(laid_out_text(page).splitlines()) == 1
+
+
+def test_the_plain_stream_of_lines_is_still_available(tmp_path: Path):
+    write_text(tmp_path / "plain.txt", _result(), keep_layout=False)
+    assert "page two" in (tmp_path / "plain.txt").read_text()
+
+
+def test_a_document_key_uses_all_of_its_identity():
+    """The key is a hash of the identity, not a slice of it. Slicing would
+    throw away everything after the first few characters, and two documents
+    that differ only in a name folded onto the end would collide."""
+    sha = "a" * 64
+    recipe = {"dpi": 300}
+    assert document_key(f"{sha}|doc.pdf", recipe) != document_key(f"{sha}|copy.pdf", recipe)
+    assert document_key(sha, recipe) == document_key(sha, recipe)
+    assert document_key(sha, {"dpi": 300}) != document_key(sha, {"dpi": 200})

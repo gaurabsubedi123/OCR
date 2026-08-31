@@ -28,9 +28,10 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from . import __version__
+from .cache import PageCache, document_key
 from .config import Settings
 from .discover import find_documents
-from .ledger import Ledger, LedgerEntry, recipe
+from .ledger import Ledger, LedgerEntry, page_recipe, recipe
 from .models import FileResult, PageResult
 from .outputs import (
     now_iso,
@@ -59,8 +60,12 @@ class Totals:
     files_done: int = 0
     files_failed: int = 0
     files_skipped: int = 0
+    files_copied: int = 0
     pages_total: int = 0
     pages_skipped: int = 0
+    # Pages that were read by a run that stopped before it could write them
+    # out, and were picked back up from disk instead of being read again.
+    pages_resumed: int = 0
     pages_done: int = 0
     pages_ocr: int = 0
     pages_text_layer: int = 0
@@ -96,19 +101,44 @@ class Run:
         self._in_flight: dict[int, str] = {}
         self._thread: threading.Thread | None = None
         self._events_file: Path | None = None
+        # Which cache folder each document's pages live in, keyed by file
+        # index. Two documents with the same bytes and the same recipe share
+        # one, which is what makes a copy free.
+        self._cache_keys: dict[int, str] = {}
+        # A document that is read -> the identical documents whose outputs are
+        # written from its pages once it is done.
+        self._twins: dict[int, list[int]] = {}
+        # Pages recovered from a stopped run, by file index and page number.
+        self._resumed: dict[int, dict[int, PageResult]] = {}
+        # Each document's content hash, so the ledger can record it.
+        self._sha_by_index: dict[int, str] = {}
 
     # ---------------------------------------------------------------- paths
 
     @property
     def run_dir(self) -> Path:
-        return self.settings.output_path / "_runs" / self.run_id
+        return self.settings.work_path / "_runs" / self.run_id
 
     @property
     def previews_dir(self) -> Path:
-        return self.settings.output_path / "_previews"
+        return self.settings.work_path / "_previews"
 
     def page_json_path(self, file_index: int) -> Path:
         return self.run_dir / "pages" / f"{file_index}.json"
+
+    def wanted_paths(self, relpath: str) -> dict[str, Path]:
+        """Where this document's outputs go, limited to the kinds this run writes."""
+        paths = output_paths(
+            self.settings.output_path, relpath, layout=self.settings.output_layout
+        )
+        return {
+            kind: path
+            for kind, path in paths.items()
+            if getattr(self.settings, f"write_{kind}")
+        }
+
+    def _cache_for(self, file_index: int) -> PageCache:
+        return PageCache(self.settings.work_path, self._cache_keys[file_index])
 
     # ---------------------------------------------------------------- control
 
@@ -188,6 +218,7 @@ class Run:
                 "settings": self.settings.to_dict(),
                 "input_dir": str(self.settings.input_path),
                 "output_dir": str(self.settings.output_path),
+                "work_dir": str(self.settings.work_path),
                 "discovery_errors": list(self.discovery_errors),
             }
             if include_files:
@@ -213,7 +244,7 @@ class Run:
             )
 
             if self.settings.skip_already_done:
-                self.ledger = Ledger(self.settings.output_path)
+                self.ledger = Ledger(self.settings.work_path, self.settings.output_path)
 
             self._set_status("discovering")
             self.publish({"type": "phase", "phase": "discovering", "message": f"Looking through {self.settings.input_path}"})
@@ -264,17 +295,28 @@ class Run:
                     self._reuse_if_done(index, result)
                 self.files.append(result)
 
+        # Copies and stopped-run pages are worked out with the lock released:
+        # both touch the disk, and nothing else is running yet.
+        self._plan_work(found)
+
+        with self._lock:
             self.totals.files_total = len(self.files)
             self.totals.files_failed = sum(1 for f in self.files if f.status == "failed")
             self.totals.files_skipped = sum(1 for f in self.files if f.status == "skipped")
+            self.totals.files_copied = sum(1 for f in self.files if f.status == "copied")
             # Skipped pages are not counted in the denominator: the progress bar
             # is about the work this run is doing, and counting pages nobody is
-            # reading would make it crawl toward a number it never reaches.
+            # reading would make it crawl toward a number it never reaches. The
+            # same goes for the pages of a copy, and for pages already read by a
+            # run that stopped.
             self.totals.pages_skipped = sum(
                 f.page_count for f in self.files if f.status == "skipped"
             )
+            self.totals.pages_resumed = sum(f.resumed_pages for f in self.files)
             self.totals.pages_total = sum(
-                f.page_count for f in self.files if f.status not in {"skipped", "failed"}
+                f.page_count - f.resumed_pages
+                for f in self.files
+                if f.status not in {"skipped", "failed", "copied"}
             )
 
         if self.totals.files_skipped:
@@ -287,6 +329,24 @@ class Run:
                     "and are being left alone."
                 ),
             })
+        if self.totals.files_copied:
+            self.publish({
+                "type": "log",
+                "level": "info",
+                "message": (
+                    f"{self.totals.files_copied} documents are byte-for-byte copies of "
+                    "another one here and will be written from it rather than read again."
+                ),
+            })
+        if self.totals.pages_resumed:
+            self.publish({
+                "type": "log",
+                "level": "info",
+                "message": (
+                    f"{self.totals.pages_resumed} pages were already read by a run that "
+                    "stopped, and are being picked up rather than read again."
+                ),
+            })
         self.publish({"type": "discovered", "files": [f.summary() for f in self.files]})
         self._publish_progress()
 
@@ -294,16 +354,7 @@ class Run:
         """Mark a document as already read, if this folder can prove it is."""
         if self.ledger is None:
             return
-        wanted = output_paths(
-            self.settings.output_path,
-            result.relpath,
-            grouped=self.settings.outputs_grouped_by_type,
-        )
-        wanted = {
-            kind: path
-            for kind, path in wanted.items()
-            if getattr(self.settings, f"write_{kind}")
-        }
+        wanted = self.wanted_paths(result.relpath)
         entry = self.ledger.already_done(
             result.relpath,
             size=result.size_bytes,
@@ -324,7 +375,7 @@ class Run:
         # earlier run's page text is copied across. Otherwise every skipped
         # document would be an empty page in the results.
         if entry.pages_json:
-            source = self.settings.output_path / entry.pages_json
+            source = self.settings.work_path / entry.pages_json
             destination = self.page_json_path(index)
             try:
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -332,19 +383,185 @@ class Run:
             except OSError as exc:
                 log.warning("could not carry over the previous result for %s: %s", result.relpath, exc)
 
+    # ------------------------------------------------------- planning the work
+
+    def _plan_work(self, found: list[Any]) -> None:
+        """Work out, before a single page is read, what actually has to be read.
+
+        Three ways a document escapes being read, and all three are decided
+        here so the page count the progress bar starts from is the real one:
+
+          it is a copy of a document already read into this folder
+          it is a copy of another document in this same run
+          some of its pages were read by a run that stopped before writing them
+
+        The first two are the same question asked of different places, and both
+        are answered by the content hash rather than by the name: the same
+        exhibit under two numbers is the ordinary case, not the exotic one.
+        """
+        settings = self.settings.to_dict()
+        # The pages are keyed on what makes a page, not on what makes a file:
+        # changing how the text is laid out must not throw away pages already
+        # read at the same resolution in the same language.
+        the_recipe = page_recipe(settings)
+        primary_by_key: dict[str, int] = {}
+
+        for index, item in enumerate(found):
+            result = self.files[index]
+            self._sha_by_index[index] = item.sha256
+            if result.status != "pending" or result.page_count <= 0:
+                continue
+
+            # One identity decides both questions, which is what keeps them
+            # consistent: two documents are the same document exactly when
+            # they share it, and documents that share it share their stored
+            # pages. A document whose bytes could not be read still gets an
+            # identity, so it can still resume — it just cannot be recognised
+            # as a copy. Size and modification time stand in for the content
+            # there, which is the same bar the skip rule already sets.
+            identity = item.sha256 or f"path:{result.relpath}:{result.size_bytes}:{result.modified}"
+            if self.settings.duplicates == "name":
+                # Same contents *and* same name.
+                identity = f"{identity}|{Path(result.relpath).name}"
+            elif self.settings.duplicates == "off":
+                identity = f"{identity}|{result.relpath}"
+            key = document_key(identity, the_recipe)
+            self._cache_keys[index] = key
+
+            if self.settings.duplicates != "off":
+                twin_index = primary_by_key.get(key)
+                if twin_index is not None:
+                    result.status = "copied"
+                    result.duplicate_of = self.files[twin_index].relpath
+                    result.page_count = self.files[twin_index].page_count
+                    self._twins.setdefault(twin_index, []).append(index)
+                    continue
+
+                if item.sha256 and self.ledger is not None:
+                    entry = self.ledger.twin_of(
+                        item.sha256,
+                        relpath=result.relpath,
+                        settings=settings,
+                        wanted=self.wanted_paths(result.relpath),
+                        same_name_only=self.settings.duplicates == "name",
+                    )
+                    if entry is not None and self._copy_from_twin(index, result, entry):
+                        continue
+
+            primary_by_key[key] = index
+
+            stored = self._cache_for(index).load(
+                page_count=result.page_count, need_pdf=self.settings.write_pdf
+            )
+            if stored:
+                self._resumed[index] = stored
+                result.resumed_pages = len(stored)
+
+    def _copy_from_twin(self, index: int, result: FileResult, entry: LedgerEntry) -> bool:
+        """Write this document's outputs from an identical one already on disk.
+
+        The PDF and the text are byte-for-byte what this document would have
+        produced, so they are copied. The JSON is rewritten rather than copied,
+        because it names the document inside itself and a file that claims to
+        be a different document is worse than no file.
+
+        Returns False if anything goes wrong, and the document is then read
+        normally — this is an optimisation, never a source of truth.
+        """
+        out_root = self.settings.output_path
+        wanted = self.wanted_paths(result.relpath)
+        written: dict[str, str] = {}
+        try:
+            for kind, dest in wanted.items():
+                source = out_root / entry.outputs[kind]
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if kind == "json":
+                    payload = json.loads(source.read_text(encoding="utf-8"))
+                    document = payload.get("document", {})
+                    document["relpath"] = result.relpath
+                    document["source_path"] = result.source_path
+                    document["duplicate_of"] = entry.relpath
+                    payload["generated_at"] = now_iso()
+                    payload["settings"] = self.settings.to_dict()
+                    dest.write_text(
+                        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+                    )
+                else:
+                    shutil.copyfile(source, dest)
+                written[kind] = str(dest.relative_to(out_root))
+        except (OSError, KeyError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            log.warning(
+                "could not write %s from the identical %s, reading it instead: %s",
+                result.relpath,
+                entry.relpath,
+                exc,
+            )
+            return False
+
+        result.status = "copied"
+        result.duplicate_of = entry.relpath
+        result.outputs = written
+        if entry.pages:
+            result.page_count = entry.pages
+        if entry.pages_json:
+            result.pages = self._pages_from_json(self.settings.work_path / entry.pages_json)
+
+        self._record_done(index, result)
+        return True
+
+    @staticmethod
+    def _pages_from_json(path: Path) -> list[PageResult]:
+        """The page results a run stored for one document, or nothing."""
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            log.warning("could not read stored pages from %s: %s", path, exc)
+            return []
+        return [PageResult.from_dict(page) for page in data.get("pages", [])]
+
+    def _record_done(self, index: int, result: FileResult) -> None:
+        """The run's own copy of the page text, and the folder's ledger entry."""
+        try:
+            self._write_run_copy(index, result)
+        except OSError as exc:
+            log.warning("could not write the run's copy of %s: %s", result.relpath, exc)
+
+        if self.ledger is not None and result.status in {"done", "copied"}:
+            self.ledger.record(
+                LedgerEntry(
+                    relpath=result.relpath,
+                    size=result.size_bytes,
+                    mtime=result.modified,
+                    pages=len(result.pages) or result.page_count,
+                    outputs=dict(result.outputs),
+                    recipe=recipe(self.settings.to_dict()),
+                    run_id=self.run_id,
+                    pages_json=f"_runs/{self.run_id}/pages/{index}.json",
+                    sha256=self._sha_by_index.get(index, ""),
+                )
+            )
+
     def _process_all(self) -> None:
         work_by_file: dict[int, list[PageWork]] = {}
         for index, result in enumerate(self.files):
             if result.status != "pending" or result.page_count <= 0:
                 continue
+            already = self._resumed.get(index, {})
+            cache = self._cache_for(index)
+            cache.note(
+                relpath=result.relpath,
+                page_count=result.page_count,
+                recipe=page_recipe(self.settings.to_dict()),
+            )
             work_by_file[index] = [
                 self._page_work(index, result, page_no)
                 for page_no in range(1, result.page_count + 1)
+                if page_no not in already
             ]
 
         with ThreadPoolExecutor(max_workers=self.settings.workers, thread_name_prefix="page") as pool:
-            futures: dict[int, list[Future]] = {
-                index: [pool.submit(self._page_task, work) for work in works]
+            futures: dict[int, list[tuple[int, Future]]] = {
+                index: [(work.page_no, pool.submit(self._page_task, work)) for work in works]
                 for index, works in work_by_file.items()
             }
 
@@ -353,7 +570,8 @@ class Run:
             # across file boundaries.
             for index, file_futures in futures.items():
                 result = self.files[index]
-                if self.cancelled and not any(f.done() for f in file_futures):
+                started = any(f.done() for _, f in file_futures)
+                if self.cancelled and not started and not self._resumed.get(index):
                     result.status = "cancelled"
                     self.publish({"type": "file", "summary": result.summary()})
                     continue
@@ -366,9 +584,12 @@ class Run:
             relpath=result.relpath,
             source_path=Path(result.source_path),
             page_no=page_no,
-            preview_dest=(self.settings.output_path / preview_rel) if self.settings.write_previews else None,
+            preview_dest=(self.settings.work_path / preview_rel) if self.settings.write_previews else None,
             preview_rel=preview_rel if self.settings.write_previews else None,
-            page_pdf_dest=(self.run_dir / "tmp" / str(index) / f"p{page_no:05d}.pdf")
+            # The page's PDF goes into the document's cache folder, not this
+            # run's, so a later run can find it. It is written before the page
+            # is stored, which makes the stored page the proof that it is whole.
+            page_pdf_dest=self._cache_for(index).page_pdf(page_no)
             if self.settings.write_pdf
             else None,
         )
@@ -385,6 +606,11 @@ class Run:
         finally:
             with self._lock:
                 self._in_flight.pop(key, None)
+
+        # On disk immediately, and only then counted. An hour of reading must
+        # never live solely in this process again.
+        if result.source != "skipped":
+            self._cache_for(work.file_index).store(result)
 
         self._count_page(work, result)
         return result
@@ -437,33 +663,42 @@ class Run:
         if done % 5 == 0 or done == self.totals.pages_total:
             self._publish_progress()
 
-    def _collect_file(self, index: int, result: FileResult, futures: list[Future]) -> None:
+    def _collect_file(
+        self, index: int, result: FileResult, futures: list[tuple[int, Future]]
+    ) -> None:
         started = time.monotonic()
-        pages: list[PageResult] = []
-        for future in futures:
+        # Pages carried over from a stopped run go in first, and the ones this
+        # run read are added by number rather than appended, so a document that
+        # was resumed comes out in page order like any other.
+        pages: dict[int, PageResult] = dict(self._resumed.get(index, {}))
+        for page_no, future in futures:
             try:
                 page = future.result()
             except Exception as exc:  # noqa: BLE001
                 page = PageResult(
-                    page_no=len(pages) + 1,
+                    page_no=page_no,
                     source="failed",
                     error=f"{type(exc).__name__}: {exc}",
                     needs_review=True,
                     review_reason="page could not be read",
                 )
             if page.source != "skipped":
-                pages.append(page)
+                pages[page.page_no] = page
 
-        result.pages = pages
+        result.pages = [pages[page_no] for page_no in sorted(pages)]
         result.duration_ms = int((time.monotonic() - started) * 1000)
 
-        if not pages:
+        if not result.pages:
             result.status = "cancelled" if self.cancelled else "failed"
             result.error = result.error or "no pages were read"
         else:
             try:
                 self._write_outputs(index, result)
-                result.status = "cancelled" if self.cancelled and len(pages) < result.page_count else "done"
+                result.status = (
+                    "cancelled"
+                    if self.cancelled and len(result.pages) < result.page_count
+                    else "done"
+                )
             except Exception as exc:  # noqa: BLE001
                 result.status = "failed"
                 result.error = f"could not write output: {type(exc).__name__}: {exc}"
@@ -474,24 +709,22 @@ class Run:
             elif result.status == "failed":
                 self.totals.files_failed += 1
 
-        try:
-            self._write_run_copy(index, result)
-        except OSError as exc:
-            log.warning("could not write the run's copy of %s: %s", result.relpath, exc)
+        self._record_done(index, result)
 
-        if result.status == "done" and self.ledger is not None:
-            self.ledger.record(
-                LedgerEntry(
-                    relpath=result.relpath,
-                    size=result.size_bytes,
-                    mtime=result.modified,
-                    pages=len(result.pages),
-                    outputs=dict(result.outputs),
-                    recipe=recipe(self.settings.to_dict()),
-                    run_id=self.run_id,
-                    pages_json=f"_runs/{self.run_id}/pages/{index}.json",
-                )
-            )
+        if result.status == "done":
+            # Identical documents are written from these same pages and the
+            # same page PDFs, which is the whole saving: one read, many copies.
+            for twin_index in self._twins.get(index, []):
+                self._write_twin(twin_index, result)
+            # Only now is the cache spent. A document that failed or was
+            # stopped keeps its pages, which is the point of them.
+            self._cache_for(index).clear()
+        else:
+            # The document these were going to be copied from never arrived.
+            # A row saying "copied" with nothing on disk is worse than a row
+            # saying what actually happened.
+            for twin_index in self._twins.get(index, []):
+                self._abandon_twin(twin_index, result)
 
         # Word boxes are on disk now; holding thousands of them for the rest of
         # the run is what turns a large case file into a memory problem.
@@ -502,13 +735,43 @@ class Run:
         self._publish_progress()
         self._write_manifest()
 
+    def _abandon_twin(self, index: int, primary: FileResult) -> None:
+        """Say plainly that a copy was not made, and why."""
+        result = self.files[index]
+        result.status = primary.status if primary.status == "cancelled" else "failed"
+        result.error = f"{primary.relpath}, which this is a copy of, was not written"
+        with self._lock:
+            self.totals.files_copied -= 1
+            if result.status == "failed":
+                self.totals.files_failed += 1
+        self.publish({"type": "file", "summary": result.summary()})
+
+    def _write_twin(self, index: int, primary: FileResult) -> None:
+        """Write a document that is byte-for-byte the one just read."""
+        result = self.files[index]
+        result.pages = primary.pages
+        result.page_count = primary.page_count
+        try:
+            self._write_outputs(index, result)
+        except Exception as exc:  # noqa: BLE001
+            result.status = "failed"
+            result.error = f"could not write output: {type(exc).__name__}: {exc}"
+            # It was counted as a copy when the work was planned; it is not one.
+            with self._lock:
+                self.totals.files_copied -= 1
+                self.totals.files_failed += 1
+        else:
+            result.status = "copied"
+            self._record_done(index, result)
+        self.publish({"type": "file", "summary": result.summary()})
+
     def _write_outputs(self, index: int, result: FileResult) -> None:
         out_root = self.settings.output_path
-        paths = output_paths(out_root, result.relpath, grouped=self.settings.outputs_grouped_by_type)
+        paths = output_paths(out_root, result.relpath, layout=self.settings.output_layout)
         written: dict[str, str] = {}
 
         if self.settings.write_txt:
-            write_text(paths["txt"], result)
+            write_text(paths["txt"], result, keep_layout=self.settings.txt_keeps_layout)
             written["txt"] = str(paths["txt"].relative_to(out_root))
 
         if self.settings.write_json:
@@ -522,14 +785,11 @@ class Run:
 
         if self.settings.write_pdf:
             source_pdf = Path(result.source_path) if result.source_path.lower().endswith(".pdf") else None
-            page_pdfs = [
-                (page, self.run_dir / "tmp" / str(index) / f"p{page.page_no:05d}.pdf")
-                for page in result.pages
-            ]
+            cache = self._cache_for(index)
+            page_pdfs = [(page, cache.page_pdf(page.page_no)) for page in result.pages]
             page_pdfs = [(p, path if path.exists() else None) for p, path in page_pdfs]
             write_searchable_pdf(paths["pdf"], source_pdf=source_pdf, pages=page_pdfs)
             written["pdf"] = str(paths["pdf"].relative_to(out_root))
-            shutil.rmtree(self.run_dir / "tmp" / str(index), ignore_errors=True)
 
         result.outputs = written
 
@@ -566,7 +826,9 @@ class Run:
             self.elapsed_s = time.monotonic() - self.started_monotonic
         self.finished_at = now_iso()
         self._set_status(status)
-        shutil.rmtree(self.run_dir / "tmp", ignore_errors=True)
+        # Nothing is deleted here. Whatever is still in the cache belongs to a
+        # document that did not finish, and it is the only reason stopping a
+        # long run is now cheap.
         try:
             write_pages_csv(self.run_dir / "pages.csv", self.files)
         except OSError as exc:
@@ -577,14 +839,15 @@ class Run:
         self.publish({"type": "done", "run": self.snapshot(include_files=True), "note": note})
 
 
-def load_run(output_dir: Path, run_id: str) -> dict[str, Any] | None:
+def load_run(work_dir: Path, run_id: str) -> dict[str, Any] | None:
     """Read a finished run's manifest back off disk.
 
     Runs outlive the process that made them: the manifest is the record, and
     the UI reads it the same way whether the run finished a second ago or last
-    week.
+    week. `work_dir` is where the bookkeeping went, which is the output folder
+    unless a separate one was chosen.
     """
-    path = Path(output_dir) / "_runs" / run_id / "manifest.json"
+    path = Path(work_dir) / "_runs" / run_id / "manifest.json"
     if not path.is_file():
         return None
     try:
@@ -593,15 +856,15 @@ def load_run(output_dir: Path, run_id: str) -> dict[str, Any] | None:
         return None
 
 
-def list_runs(output_dir: Path) -> list[dict[str, Any]]:
-    root = Path(output_dir) / "_runs"
+def list_runs(work_dir: Path) -> list[dict[str, Any]]:
+    root = Path(work_dir) / "_runs"
     if not root.is_dir():
         return []
     runs: list[dict[str, Any]] = []
     for entry in sorted(root.iterdir(), reverse=True):
         if not entry.is_dir():
             continue
-        manifest = load_run(Path(output_dir), entry.name)
+        manifest = load_run(Path(work_dir), entry.name)
         if manifest is None:
             continue
         runs.append(
@@ -614,13 +877,14 @@ def list_runs(output_dir: Path) -> list[dict[str, Any]]:
                 "totals": manifest.get("totals", {}),
                 "input_dir": manifest.get("input_dir"),
                 "output_dir": manifest.get("output_dir"),
+                "work_dir": manifest.get("work_dir"),
             }
         )
     return runs
 
 
-def load_document(output_dir: Path, run_id: str, file_index: int) -> dict[str, Any] | None:
-    path = Path(output_dir) / "_runs" / run_id / "pages" / f"{file_index}.json"
+def load_document(work_dir: Path, run_id: str, file_index: int) -> dict[str, Any] | None:
+    path = Path(work_dir) / "_runs" / run_id / "pages" / f"{file_index}.json"
     if not path.is_file():
         return None
     try:

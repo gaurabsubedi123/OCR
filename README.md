@@ -10,13 +10,17 @@ or call a model over your documents.
 
 ```
   input/                        output/
-    Ex 13/                        pdf/                  same pages, now searchable
-      exhibit-01.pdf   ─────▶       Ex 13/exhibit-01.pdf
-      exhibit-02.pdf                Ex 25 photos/IMG_4001.pdf
-    Ex 25 photos/                 txt/                  the text, page by page
-      IMG_4001.jpg                  Ex 13/exhibit-01.txt
-                                  json/                 text + confidence + word positions
-                                    Ex 13/exhibit-01.json
+    Ex 13/                        Ex 13/
+      exhibit-01.pdf   ─────▶       pdf/                same pages, now searchable
+      exhibit-02.pdf                  exhibit-01.pdf
+    Ex 25 photos/                   txt/                the text, laid out like the page
+      IMG_4001.jpg                    exhibit-01.txt
+                                    json/               text + confidence + word positions
+                                      exhibit-01.json
+                                  Ex 25 photos/
+                                    pdf/
+                                      IMG_4001.pdf
+                                    txt/ json/
                                   _previews/            a picture of every page
                                   _runs/                what happened, and pages.csv
 ```
@@ -33,6 +37,8 @@ or call a model over your documents.
 - [Using it from the command line](#using-it-from-the-command-line)
 - [Every option](#every-option)
 - [It does not read the same document twice](#it-does-not-read-the-same-document-twice)
+- […or the same document under two names](#it-does-not-read-the-same-document-twice-under-two-names-either)
+- [Stopping a run costs nothing](#stopping-a-run-costs-nothing)
 - [How it decides things](#how-it-decides-things)
 - [How fast it is](#how-fast-it-is)
 - [Troubleshooting](#troubleshooting)
@@ -43,32 +49,67 @@ or call a model over your documents.
 
 ## What you get
 
-Each kind of output gets its own folder, and your subfolder names are repeated
-inside each one — so `pdf/` is a complete set of searchable documents you can
-hand to someone without explaining what the rest is for, and so is `txt/`:
+Your input folder is mirrored, and **every folder that holds documents gets its
+own `pdf/`, `txt/` and `json/` inside it**. Walk to where a document was and its
+results are right there, however deep it sits:
+
+```
+ocr-input/                              ocr-output/
+  loose.pdf                               pdf/loose.pdf
+                                          txt/loose.txt
+                                          json/loose.json
+  Medical/                                Medical/
+    bills.pdf                               pdf/bills.pdf
+                                            txt/bills.txt
+                                            json/bills.json
+    Hemet/                                  Hemet/
+      records.pdf                             pdf/records.pdf
+                                              txt/records.txt
+                                              json/records.json
+```
 
 | File | What it is |
 | --- | --- |
-| `pdf/…/name.pdf` | The same pages, now with selectable, searchable text behind the page image — open it in any PDF reader and Ctrl-F works. The page still looks like your original, in colour; pages that already had a text layer are copied through untouched. |
-| `txt/…/name.txt` | Plain text, with a `----- page 3 (ocr) -----` marker before each page saying where that page's text came from. |
-| `json/…/name.json` | Per page: the text, tesseract's confidence, whether it was flagged, and every word with its position on the page image. |
+| `…/pdf/name.pdf` | The same pages, now with selectable, searchable text behind the page image — open it in any PDF reader and Ctrl-F works. The page still looks like your original, in colour; pages that already had a text layer are copied through untouched. |
+| `…/txt/name.txt` | The text, laid out the way the page was — columns, tables and forms stay lined up — with a `----- page 3 (ocr) -----` marker before each page saying where that page's text came from. |
+| `…/json/name.json` | Per page: the text, tesseract's confidence, whether it was flagged, and every word with its position on the page image. |
 
 And for the run as a whole:
 
 | Path | What it is |
 | --- | --- |
-| `_previews/<document>/p0001.jpg` | A screen-sized picture of every page. This is what lets you check a result against the page it came from. |
+| `_previews/<document>/p0001.jpg` | A screen-sized picture of every page. This is what lets you check a result against the page it came from. `--no-previews` skips them; the viewer then has nothing to show a page against. |
 | `_runs/<run-id>/pages.csv` | One row per page: source, confidence, characters, seconds, and why it was flagged. Sort by confidence to find what to check first. |
 | `_runs/<run-id>/manifest.json` | The full record of the run: settings, timings, per-file results. |
 | `_runs/<run-id>/events.jsonl` | What happened, in order, as it happened. |
 
-`--outputs-together` (or unticking the box in the browser) puts each document's
-three files beside each other instead, in a single tree mirroring your input.
+Two other shapes are available, with `--outputs` or the dropdown in the browser:
+
+- `--outputs by-type` collects everything under one `pdf/`, `txt/` and `json/`
+  at the top, each repeating your subfolders inside it. Use it when you want
+  the searchable PDFs as one complete set to hand to someone.
+- `--outputs together` puts a document's three files beside each other, in one
+  tree mirroring your input, with no folders in between.
 
 Nothing in the output folder is required by anything else — the PDFs and text
 files stand alone, and you can delete `_runs/` and `_previews/` once you have
 what you need. (The browser viewer reads `_runs/`, so keep it while you are
-still reviewing.)
+still reviewing. Keep `_runs/completed.json`: it is what stops the next run
+re-reading everything.) A `_cache/` folder means a run was stopped part-way and
+its pages are waiting to be [picked back up](#stopping-a-run-costs-nothing).
+
+**Or keep them out of the way entirely.** `--work-dir` sends `_runs/`,
+`_previews/` and `_cache/` somewhere else, leaving the output folder holding
+nothing but your results:
+
+```
+ocrtool folders --work ~/.ocrtool/work    # remember it, then just `ocrtool run`
+ocrtool run --work-dir /somewhere/else    # or say it once
+ocrtool folders --work ""                 # put them back with the results
+```
+
+The browser viewer follows either way — it knows which folder a run's page
+pictures went to.
 
 ---
 
@@ -141,9 +182,23 @@ ocrtool run                # reads the default input folder into the default out
 ocrtool ui                 # the form opens with both already filled in
 ```
 
-Anything you pass explicitly still wins, and `OCRTOOL_INPUT_DIR` /
-`OCRTOOL_OUTPUT_DIR` in the environment override the saved values. The settings
-live in `~/.ocrtool/config.json`.
+A third folder is optional. By default the tool's own `_runs/`, `_previews/`
+and `_cache/` sit in the output folder alongside your results; `--work` sends
+them somewhere else so the output folder holds nothing but your
+`pdf/ txt/ json/` tree:
+
+```bash
+ocrtool folders --work ~/.ocrtool/work
+ocrtool folders --work ""     # put them back with the results
+```
+
+Anything you pass explicitly still wins, and `OCRTOOL_INPUT_DIR`,
+`OCRTOOL_OUTPUT_DIR` and `OCRTOOL_WORK_DIR` in the environment override the
+saved values. The settings live in `~/.ocrtool/config.json`.
+
+If you move an existing `_runs/` and `_previews/` into a new work folder, move
+them **together** — `_runs/completed.json` is the record of what has already
+been read, and leaving it behind makes the next run read everything again.
 
 ---
 
@@ -307,14 +362,17 @@ folder is the record, and the UI reads it back.
 | Write .txt files | `--no-txt` to disable | on | |
 | Write .json files | `--no-json` to disable | on | |
 | Save page pictures | `--no-previews` to disable | on | The browser viewer needs these. |
-| Sort outputs into `pdf/` `txt/` `json/` | `--outputs-together` to disable | on | Disabling puts a document's three files beside each other in one tree that mirrors your input. |
+| Where the tool's own folders go | `--work-dir` | the output folder | Sends `_runs/`, `_previews/` and `_cache/` elsewhere. `ocrtool folders --work <dir>` remembers it. |
+| Where the results go | `--outputs` | `by-folder` | `by-folder` mirrors your input and puts `pdf/ txt/ json/` inside each folder that holds documents; `by-type` collects one `pdf/`, `txt/` and `json/` at the top; `together` puts a document's three files side by side. |
+| Keep the page's layout in the `.txt` | `--txt-plain` to disable | on | Puts the words back where they were on the page, so columns and tables stay lined up. Disabling gives the plain stream of lines tesseract returns. |
+| Documents that are the same | `--duplicates` | `name` | `name` = same file name and same contents; `content` = same contents whatever they are called; `off` = read every file on its own. Contents are checked in every mode. |
 | Skip documents already read | `--redo` to disable | on | Leaves alone any document this output folder already holds results for. See [above](#it-does-not-read-the-same-document-twice). |
 | Keep the page as it looks in the PDF | `--pdf-cleaned-image` to disable | on | Puts your original page picture into the searchable PDF instead of the greyscale copy OCR read. Disabling makes smaller files. |
 | Page segmentation mode | `--psm` | 3 | 3 automatic, 4 single column, 6 one block, 11/12 sparse text. |
 
 `OCRTOOL_TESSERACT` overrides where the tesseract binary is found;
-`OCRTOOL_INPUT_DIR` and `OCRTOOL_OUTPUT_DIR` override the default folders, and
-`OCRTOOL_STATE_DIR` moves `~/.ocrtool` somewhere else.
+`OCRTOOL_INPUT_DIR`, `OCRTOOL_OUTPUT_DIR` and `OCRTOOL_WORK_DIR` override the
+default folders, and `OCRTOOL_STATE_DIR` moves `~/.ocrtool` somewhere else.
 
 ---
 
@@ -344,16 +402,81 @@ the document is read again. The check errs toward re-reading, because being
 wrong that way costs time, while being wrong the other way silently leaves you
 with a stale document.
 
-This is also how you resume. Stop a run halfway and start it again: whatever
-finished is on disk and is skipped, and the rest is read. And it means a folder
-you add to over weeks only ever costs the time of what you added.
-
 `--redo`, or unticking the box in the browser, reads everything again.
 Deleting `_runs/completed.json` has the same effect.
 
 A folder read before this feature existed is not wasted: the record is built
 from the earlier runs' manifests the first time, so those documents are
 recognised too.
+
+---
+
+## It does not read the same document twice under two names either
+
+The same file routinely turns up in more than one folder, and reading it twice
+produces two identical results at twice the cost. So when two documents are the
+same document, one is read and the other's files are written from it.
+
+By default that means **the same file name and the same contents**. Every
+source file is hashed as it is discovered — a fraction of a second per hundred
+megabytes, against minutes per hundred pages:
+
+```
+input/A/manual.pdf   ─────▶  read
+input/B/manual.pdf   ─────▶  copied from A/manual.pdf
+```
+
+Contents are checked in **every** mode, and this is not negotiable: `scan.pdf`
+is in every folder anyone has ever had, and writing one document's text under
+another document's name would be worse than any amount of time saved. Two files
+sharing a name but not their bytes are two documents, and both are read.
+
+`--duplicates` chooses the rule:
+
+| Value | Two documents are the same when… |
+| --- | --- |
+| `name` (default) | they have the same file name **and** the same contents |
+| `content` | they have the same contents, whatever either is called |
+| `off` | never — every file is read on its own |
+
+`content` is worth having when a folder holds the same document under several
+names, which is ordinary in an exhibit list. On a test folder of 9 files that
+were really 2 documents under 9 names, it was the difference between reading
+359 pages and reading 1,432 — 3 minutes against about 13.
+
+The copy is a real, complete set of files at its own path, not a shortcut or a
+link. Its `.json` names itself and records which document it came from, so a
+file that was never read never looks like one that was. Its pages point at the
+identical document's page pictures, so it opens in the viewer like any other.
+This works within a single run and across runs: add a copy of something this
+folder already holds and it costs a file copy, not a reading.
+
+---
+
+## Stopping a run costs nothing
+
+Every page is written to disk the moment it is read. Start again and it picks
+up from the first page that never arrived:
+
+```
+1,867 pages were already read by a run that stopped, and are being picked up
+rather than read again.
+```
+
+This matters at the scale these folders actually reach. A 4,586-page hospital
+record takes about two and a half hours; stopping it an hour in used to throw
+away every one of those pages, because a page's text lived in memory until the
+whole document finished and only then was written anywhere.
+
+The unfinished pages sit in `_cache/`, keyed by the document's content hash and
+the settings it was read with — so a document that was renamed or moved still
+finds its own pages, and pages read at a different resolution are never resumed
+onto. A document's folder is deleted the moment it is fully written out, which
+means `_cache/` only ever holds work that is genuinely unfinished. It is safe
+to delete: it costs the time to read those pages again, nothing more.
+
+Changing how the `.txt` is laid out rewrites the files without discarding the
+pages, because it does not change what a page is — only what is written from it.
 
 ---
 
@@ -426,6 +549,12 @@ Measured on one machine (8 cores, 8 workers, 300 dpi, letter-size pages):
   recognised.
 - **Running it again over an unchanged folder takes seconds**, because nothing
   is read twice.
+- **A copy costs a file copy, not a reading.** A folder of 9 files that were
+  really 2 documents under 9 names took 3 minutes 22 seconds with
+  `--duplicates content` — 359 pages read — against about 13 minutes to read
+  all 1,432 pages.
+- **A run that is stopped keeps every page it read.** Starting it again picks
+  them up; only what was still missing is read.
 
 Keeping your original page image in the searchable PDF costs about 20% (that
 52-page folder is 11 seconds with `--pdf-cleaned-image`, 14 with it on). Every

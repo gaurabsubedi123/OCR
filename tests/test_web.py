@@ -198,3 +198,62 @@ def test_cancelling_a_run_from_the_browser(client, sample_folder: Path, tmp_path
     snapshot = _wait_for(client, run_id)
     assert snapshot["status"] in {"cancelled", "done"}  # a tiny folder can beat the click
     registry.get(run_id).join(timeout=30)
+
+
+@needs_tesseract
+def test_the_viewer_works_with_the_tools_folders_kept_apart(
+    client, sample_folder: Path, tmp_path: Path
+):
+    """With a work folder chosen, results and page pictures live in different
+    folders — and the viewer has to serve both without being told which."""
+    output = tmp_path / "output"
+    work = tmp_path / "work"
+    created = client.post(
+        "/api/runs",
+        json={
+            "input_dir": str(sample_folder),
+            "output_dir": str(output),
+            "work_dir": str(work),
+            "dpi": 150,
+            "workers": 2,
+        },
+    )
+    assert created.status_code == 201
+    run_id = created.get_json()["run_id"]
+
+    snapshot = _wait_for(client, run_id)
+    assert snapshot["status"] == "done"
+    assert snapshot["work_dir"] == str(work)
+
+    # The output folder holds the results and nothing else.
+    assert sorted(p.name for p in output.iterdir()) == ["json", "pdf", "sub", "txt"]
+
+    assert client.get(f"/runs/{run_id}").status_code == 200
+    document = client.get(f"/api/runs/{run_id}/documents/0").get_json()
+    assert document["pages"][0]["text"]
+
+    # A result, served out of the output folder.
+    for relpath in document["outputs"].values():
+        assert client.get(f"/files/{run_id}/{relpath}").status_code == 200
+    # A page picture and a report, served out of the work folder.
+    assert client.get(f"/files/{run_id}/{document['pages'][0]['preview']}").status_code == 200
+    assert client.get(f"/files/{run_id}/_runs/{run_id}/pages.csv?download=1").status_code == 200
+
+    hits = client.get(f"/api/runs/{run_id}/search?q=MARTINEZ").get_json()["hits"]
+    assert hits
+
+
+@needs_tesseract
+def test_the_input_folder_may_not_sit_inside_the_work_folder(client, sample_folder: Path):
+    """The work folder holds a PDF and a JPEG of every page, so reading from
+    inside it is the same feedback loop wearing a different hat."""
+    response = client.post(
+        "/api/runs",
+        json={
+            "input_dir": str(sample_folder),
+            "output_dir": str(sample_folder.parent / "out"),
+            "work_dir": str(sample_folder.parent),
+        },
+    )
+    assert response.status_code == 400
+    assert "work folder" in response.get_json()["error"]

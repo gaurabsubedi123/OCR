@@ -191,6 +191,7 @@ $('#start').addEventListener('click', async () => {
     const { url } = await postJSON('/api/runs', {
       input_dir: activeInput(),
       output_dir: $('#output-dir').value.trim(),
+      work_dir: $('#work-dir').value.trim(),
       dpi: Number($('#dpi').value),
       lang: $('#lang').value,
       psm: Number($('#psm').value),
@@ -205,7 +206,9 @@ $('#start').addEventListener('click', async () => {
       write_json: $('#write-json').checked,
       write_previews: $('#write-previews').checked,
       pdf_keeps_source_image: $('#pdf-source-image').checked,
-      outputs_grouped_by_type: $('#group-outputs').checked,
+      txt_keeps_layout: $('#txt-layout').checked,
+      output_layout: $('#output-layout').value,
+      duplicates: $('#duplicates').value,
       skip_already_done: $('#skip-done').checked,
     });
     window.location.href = url;

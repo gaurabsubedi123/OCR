@@ -34,12 +34,15 @@ from flask import (
 from .. import __version__
 from ..config import (
     DEFAULT_DPI,
+    DEFAULT_DUPLICATES,
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_PSM,
+    RESERVED_DIRS,
     Settings,
     default_folders,
     default_workers,
 )
+from ..outputs import DEFAULT_LAYOUT
 from ..discover import find_documents
 from ..runner import Run, load_document, load_run
 from ..tesseract import installed_languages, tesseract_path, tesseract_version
@@ -53,12 +56,18 @@ registry = Registry()
 UPLOAD_DIRNAME = "_uploads"
 
 
-def create_app(*, default_input: str | None = None, default_output: str | None = None) -> Flask:
+def create_app(
+    *,
+    default_input: str | None = None,
+    default_output: str | None = None,
+    default_work: str | None = None,
+) -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024 * 1024  # 4 GB of scans in one go
     folders = default_folders()
     app.config["DEFAULT_INPUT"] = default_input or folders["input"]
     app.config["DEFAULT_OUTPUT"] = default_output or folders["output"]
+    app.config["DEFAULT_WORK"] = default_work or folders.get("work", "")
     app.config["JSON_SORT_KEYS"] = False
     app.register_blueprint(bp)
     return app
@@ -77,6 +86,7 @@ def index() -> str:
         defaults={
             "input": request.args.get("input", "") or _app_config("DEFAULT_INPUT"),
             "output": request.args.get("output", "") or _app_config("DEFAULT_OUTPUT"),
+            "work": request.args.get("work", "") or _app_config("DEFAULT_WORK"),
             "dpi": DEFAULT_DPI,
             "psm": DEFAULT_PSM,
             "workers": default_workers(),
@@ -89,16 +99,14 @@ def index() -> str:
 
 @bp.get("/runs/<run_id>")
 def run_page(run_id: str) -> str:
-    output_dir = registry.find_output_dir(run_id)
-    if output_dir is None:
-        abort(404, "That run is not on this machine, or its output folder has moved.")
+    if registry.find_work_dir(run_id) is None:
+        abort(404, "That run is not on this machine, or its folders have moved.")
     return render_template("run.html", run_id=run_id, version=__version__)
 
 
 @bp.get("/runs/<run_id>/documents/<int:index>")
 def document_page(run_id: str, index: int) -> str:
-    output_dir = registry.find_output_dir(run_id)
-    if output_dir is None:
+    if registry.find_work_dir(run_id) is None:
         abort(404)
     return render_template("document.html", run_id=run_id, index=index, version=__version__)
 
@@ -243,6 +251,7 @@ def api_start_run() -> Any:
     settings = Settings(
         input_dir=input_dir,
         output_dir=output_dir,
+        work_dir=str(payload.get("work_dir") or ""),
         dpi=int(payload.get("dpi", DEFAULT_DPI)),
         lang=str(payload.get("lang", "eng")),
         psm=int(payload.get("psm", DEFAULT_PSM)),
@@ -256,7 +265,9 @@ def api_start_run() -> Any:
         include_word_boxes=bool(payload.get("include_word_boxes", True)),
         write_previews=bool(payload.get("write_previews", True)),
         pdf_keeps_source_image=bool(payload.get("pdf_keeps_source_image", True)),
-        outputs_grouped_by_type=bool(payload.get("outputs_grouped_by_type", True)),
+        txt_keeps_layout=bool(payload.get("txt_keeps_layout", True)),
+        duplicates=str(payload.get("duplicates", DEFAULT_DUPLICATES)),
+        output_layout=str(payload.get("output_layout", DEFAULT_LAYOUT)),
         skip_already_done=bool(payload.get("skip_already_done", True)),
         min_confidence=float(payload.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
         recursive=bool(payload.get("recursive", True)),
@@ -279,6 +290,18 @@ def api_start_run() -> Any:
             {"error": "the input folder is inside the output folder — pick separate folders"}
         ), 400
 
+    # The work folder holds a PDF of every page and a JPEG of every page, so
+    # reading from inside it is the same mistake wearing a different hat.
+    if settings.work_is_separate and _is_inside(settings.input_path, settings.work_path):
+        return jsonify(
+            {"error": "the input folder is inside the work folder — pick separate folders"}
+        ), 400
+
+    try:
+        settings.work_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return jsonify({"error": f"cannot write to that work folder: {exc}"}), 400
+
     run = Run(settings)
     registry.add(run)
     run.start()
@@ -295,8 +318,8 @@ def api_run(run_id: str) -> Any:
     live = registry.get(run_id)
     if live is not None:
         return jsonify(live.snapshot(include_files=True))
-    output_dir = registry.find_output_dir(run_id)
-    manifest = load_run(output_dir, run_id) if output_dir else None
+    work_dir = registry.find_work_dir(run_id)
+    manifest = load_run(work_dir, run_id) if work_dir else None
     if manifest is None:
         abort(404)
     return jsonify(manifest)
@@ -345,10 +368,10 @@ def api_events(run_id: str) -> Response:
 
 @bp.get("/api/runs/<run_id>/documents/<int:index>")
 def api_document(run_id: str, index: int) -> Any:
-    output_dir = registry.find_output_dir(run_id)
-    if output_dir is None:
+    work_dir = registry.find_work_dir(run_id)
+    if work_dir is None:
         abort(404)
-    document = load_document(output_dir, run_id, index)
+    document = load_document(work_dir, run_id, index)
     if document is None:
         # The file may still be in progress: report that rather than 404, so the
         # viewer can say "still being read" instead of "not found".
@@ -371,10 +394,10 @@ def api_search(run_id: str) -> Any:
     if len(query) < 2:
         return jsonify({"query": query, "hits": [], "error": "type at least two characters"})
 
-    output_dir = registry.find_output_dir(run_id)
-    if output_dir is None:
+    work_dir = registry.find_work_dir(run_id)
+    if work_dir is None:
         abort(404)
-    pages_dir = Path(output_dir) / "_runs" / run_id / "pages"
+    pages_dir = Path(work_dir) / "_runs" / run_id / "pages"
     if not pages_dir.is_dir():
         return jsonify({"query": query, "hits": []})
 
@@ -409,18 +432,27 @@ def api_search(run_id: str) -> Any:
 
 @bp.get("/files/<run_id>/<path:relpath>")
 def files(run_id: str, relpath: str) -> Response:
-    """Serve anything inside this run's output folder: previews, PDFs, text.
+    """Serve this run's results and the pictures that go with them.
 
-    send_from_directory refuses to escape the directory it is given, so the
-    output folder is the boundary.
+    Results live in the output folder and page pictures live in the work
+    folder, which are the same folder unless a separate one was chosen. The
+    first path segment says which: the tool's own folders all begin with an
+    underscore and are reserved, so there is nothing to guess.
+
+    send_from_directory refuses to escape the directory it is given, so
+    whichever folder is chosen is the boundary.
     """
-    output_dir = registry.find_output_dir(run_id)
-    if output_dir is None:
+    first = relpath.replace("\\", "/").split("/", 1)[0]
+    if first in RESERVED_DIRS:
+        root = registry.find_work_dir(run_id)
+    else:
+        root = registry.find_output_dir(run_id)
+    if root is None:
         abort(404)
     download = request.args.get("download") == "1"
     mimetype, _ = mimetypes.guess_type(relpath)
     return send_from_directory(
-        output_dir,
+        root,
         relpath,
         as_attachment=download,
         mimetype=mimetype or "application/octet-stream",

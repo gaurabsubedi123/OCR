@@ -126,9 +126,34 @@
         <label class="toggle"><input type="checkbox" id="skip-done" checked>
           <span>Skip documents this output folder has already read
           <span class="note">— add files to a folder and only the new ones are read</span></span></label>
-        <label class="toggle"><input type="checkbox" id="group-outputs" checked>
-          <span>Sort outputs into <span class="mono">pdf/</span> <span class="mono">txt/</span> <span class="mono">json/</span>
-          <span class="note">— uncheck to keep each document's files together</span></span></label>
+        <div class="mt">
+          <label for="work-dir">Keep the tool's own folders somewhere else</label>
+          <input type="text" id="work-dir" class="mono" spellcheck="false" value="{{ defaults.work }}" placeholder="leave blank to keep them with the results">
+          <p class="dim" style="font-size:12.5px; margin:4px 0 0">
+            <span class="mono">_runs/</span>, <span class="mono">_previews/</span> and
+            <span class="mono">_cache/</span> go here instead, leaving the output folder
+            holding nothing but your <span class="mono">pdf/ txt/ json/</span> tree.
+          </p>
+        </div>
+        <div class="mt">
+          <label for="duplicates">Documents that are the same</label>
+          <select id="duplicates">
+            <option value="name" selected>Same name and same contents — read once, written to both places</option>
+            <option value="content">Same contents, whatever they are called — read once, written to every place</option>
+            <option value="off">Never — read every file on its own</option>
+          </select>
+        </div>
+        <div class="mt">
+          <label for="output-layout">Where the results go</label>
+          <select id="output-layout">
+            <option value="by-folder" selected>Beside each folder — pdf/ txt/ json/ in every folder that holds documents</option>
+            <option value="by-type">All together — one pdf/, txt/ and json/ at the top</option>
+            <option value="together">Side by side — a document's three files next to each other</option>
+          </select>
+        </div>
+        <label class="toggle"><input type="checkbox" id="txt-layout" checked>
+          <span>Keep the page's layout in the <span class="mono">.txt</span>
+          <span class="note">— columns and tables stay lined up; uncheck for plain lines</span></span></label>
         <label class="toggle"><input type="checkbox" id="pdf-source-image" checked>
           <span>Keep the page as it looks in the PDF <span class="note">— colour and all; uncheck for smaller files</span></span></label>
         <label class="toggle"><input type="checkbox" id="write-previews" checked>

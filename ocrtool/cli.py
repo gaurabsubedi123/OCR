@@ -14,14 +14,17 @@ from pathlib import Path
 from . import __version__
 from .config import (
     DEFAULT_DPI,
+    DEFAULT_DUPLICATES,
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_PSM,
+    DUPLICATE_RULES,
     Settings,
     config_path,
     default_folders,
     default_workers,
     save_default_folders,
 )
+from .outputs import DEFAULT_LAYOUT, LAYOUTS
 from .runner import Run, run_blocking
 from .tesseract import installed_languages, tesseract_path, tesseract_version
 
@@ -43,6 +46,15 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument(
         "-o", "--output", default=None, help=f"folder to write results into (default {folders['output']})"
     )
+    run_cmd.add_argument(
+        "--work-dir",
+        default=None,
+        help=(
+            "where the tool's own folders go — _runs/, _previews/ and _cache/. "
+            "Defaults to the output folder; point it elsewhere to leave the "
+            "output folder holding nothing but your results"
+        ),
+    )
     run_cmd.add_argument("--dpi", type=int, default=DEFAULT_DPI, help=f"render resolution (default {DEFAULT_DPI})")
     run_cmd.add_argument("--lang", default="eng", help="tesseract language code (default eng)")
     run_cmd.add_argument("--psm", type=int, default=DEFAULT_PSM, help=f"page segmentation mode (default {DEFAULT_PSM})")
@@ -60,9 +72,35 @@ def main(argv: list[str] | None = None) -> int:
         help="read every document again, even ones this output folder already holds results for",
     )
     run_cmd.add_argument(
+        "--outputs",
+        choices=LAYOUTS,
+        default=DEFAULT_LAYOUT,
+        help=(
+            "where results go: by-folder mirrors the input and puts pdf/ txt/ json/ "
+            "inside each folder that holds documents (default); by-type collects one "
+            "pdf/, txt/ and json/ at the top; together puts a document's three files "
+            "side by side"
+        ),
+    )
+    run_cmd.add_argument(
         "--outputs-together",
         action="store_true",
-        help="put a document's pdf, txt and json beside each other instead of in pdf/ txt/ json/",
+        help="the same as --outputs together",
+    )
+    run_cmd.add_argument(
+        "--duplicates",
+        choices=DUPLICATE_RULES,
+        default=DEFAULT_DUPLICATES,
+        help=(
+            "when two documents count as one, so one is read and the other is "
+            "written from it: name = same name and same contents (default); "
+            "content = same contents whatever they are called; off = never"
+        ),
+    )
+    run_cmd.add_argument(
+        "--txt-plain",
+        action="store_true",
+        help="write the .txt as a plain stream of lines instead of keeping the page's layout",
     )
     run_cmd.add_argument(
         "--pdf-cleaned-image",
@@ -83,6 +121,11 @@ def main(argv: list[str] | None = None) -> int:
     ui_cmd.add_argument("--port", type=int, default=5000)
     ui_cmd.add_argument("--output", default=None, help=f"output folder to offer in the form (default {folders['output']})")
     ui_cmd.add_argument("--input", default=None, help=f"input folder to offer in the form (default {folders['input']})")
+    ui_cmd.add_argument(
+        "--work-dir",
+        default=None,
+        help="folder to offer for the tool's own _runs/, _previews/ and _cache/",
+    )
     ui_cmd.add_argument("--debug", action="store_true")
 
     sub.add_parser("doctor", help="check that everything this tool needs is present")
@@ -90,6 +133,14 @@ def main(argv: list[str] | None = None) -> int:
     folders_cmd = sub.add_parser("folders", help="show or set the default input and output folders")
     folders_cmd.add_argument("--input", default=None, help="folder to read documents from by default")
     folders_cmd.add_argument("--output", default=None, help="folder to write results into by default")
+    folders_cmd.add_argument(
+        "--work",
+        default=None,
+        help=(
+            "folder for the tool's own _runs/, _previews/ and _cache/ "
+            "(pass an empty string to put them back with the results)"
+        ),
+    )
 
     args = parser.parse_args(argv)
     if args.command == "run":
@@ -101,11 +152,20 @@ def main(argv: list[str] | None = None) -> int:
     return _cmd_doctor()
 
 
+def _is_inside(inner: Path, outer: Path) -> bool:
+    try:
+        inner.relative_to(outer)
+        return True
+    except ValueError:
+        return False
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     folders = default_folders()
     settings = Settings(
         input_dir=args.input or folders["input"],
         output_dir=args.output or folders["output"],
+        work_dir=args.work_dir if args.work_dir is not None else folders.get("work", ""),
         dpi=args.dpi,
         lang=args.lang,
         psm=args.psm,
@@ -118,7 +178,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         write_json=not args.no_json,
         write_previews=not args.no_previews,
         pdf_keeps_source_image=not args.pdf_cleaned_image,
-        outputs_grouped_by_type=not args.outputs_together,
+        txt_keeps_layout=not args.txt_plain,
+        duplicates=args.duplicates,
+        output_layout="together" if args.outputs_together else args.outputs,
         skip_already_done=not args.redo,
         min_confidence=args.min_confidence,
         recursive=not args.no_recursive,
@@ -131,8 +193,22 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print("tesseract was not found — run `ocrtool doctor`.", file=sys.stderr)
         return 2
 
+    if settings.work_is_separate and _is_inside(settings.input_path, settings.work_path):
+        print(
+            f"the input folder is inside the work folder: {settings.work_path}",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        settings.work_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"cannot write to that work folder: {exc}", file=sys.stderr)
+        return 2
+
     print(f"Reading  {settings.input_path}")
     print(f"Writing  {settings.output_path}")
+    if settings.work_is_separate:
+        print(f"Working  {settings.work_path}")
     print(f"Workers  {settings.workers}   dpi {settings.dpi}   lang {settings.lang}\n")
 
     state = {"line": "", "printed_at": 0.0}
@@ -201,12 +277,16 @@ def _cmd_ui(args: argparse.Namespace) -> int:
     app = create_app(
         default_input=args.input or folders["input"],
         default_output=args.output or folders["output"],
+        default_work=args.work_dir if args.work_dir is not None else folders.get("work", ""),
     )
     url = f"http://{args.host}:{args.port}"
     print(f"ocrtool {__version__}")
     print(f"tesseract: {tesseract_version() or 'NOT FOUND — run `ocrtool doctor`'}")
     print(f"reading from: {args.input or folders['input']}")
     print(f"writing to:   {args.output or folders['output']}")
+    work = args.work_dir if args.work_dir is not None else folders.get("work", "")
+    if work:
+        print(f"working in:   {work}")
     print(f"\n  Open {url}\n")
     print("Ctrl-C to stop.")
     app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
@@ -214,8 +294,10 @@ def _cmd_ui(args: argparse.Namespace) -> int:
 
 
 def _cmd_folders(args: argparse.Namespace) -> int:
-    if args.input or args.output:
-        folders = save_default_folders(input_dir=args.input, output_dir=args.output)
+    if args.input or args.output or args.work is not None:
+        folders = save_default_folders(
+            input_dir=args.input, output_dir=args.output, work_dir=args.work
+        )
         print(f"saved in {config_path()}\n")
     else:
         folders = default_folders()
@@ -224,6 +306,13 @@ def _cmd_folders(args: argparse.Namespace) -> int:
         path = Path(folders[key]).expanduser()
         state = "" if path.is_dir() else "   (does not exist yet)"
         print(f"{label}  {path}{state}")
+
+    if folders.get("work"):
+        path = Path(folders["work"]).expanduser()
+        state = "" if path.is_dir() else "   (does not exist yet)"
+        print(f"work    {path}{state}")
+    else:
+        print("work    (kept with the results)")
     return 0
 
 
