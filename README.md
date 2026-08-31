@@ -118,10 +118,16 @@ pictures went to.
 You need **Python 3.10 or newer** and the **tesseract** binary. Everything else
 installs into a local virtual environment.
 
+### Get it
+
+```bash
+git clone https://github.com/<your-account>/ocrtool.git
+cd ocrtool
+```
+
 ### With uv (recommended — fastest)
 
 ```bash
-cd /path/to/ocr
 uv venv                          # creates .venv
 uv pip install -e ".[dev]"       # the tool plus its test dependencies
 ```
@@ -129,11 +135,15 @@ uv pip install -e ".[dev]"       # the tool plus its test dependencies
 ### With plain pip
 
 ```bash
-cd /path/to/ocr
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+Nothing is machine-specific in the repository. Your folder choices live in
+`~/.ocrtool/config.json` on whichever machine you are on, not in the checkout,
+so a fresh clone starts from `~/ocr-input` and `~/ocr-output` until you say
+otherwise with `ocrtool folders`.
 
 Four dependencies get installed, all permissive-licensed: `pypdfium2` (renders
 and assembles PDFs), `pillow` (images), `numpy` (deskew), and `Flask` (the local
