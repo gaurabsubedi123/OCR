@@ -7,9 +7,9 @@ of results has to answer, and different jobs answer it differently.
 three kinds side by side *inside each folder that holds documents*. Walk to
 where the document was and its outputs are right there:
 
-  input/Medical/Hemet/13.pdf  ->  output/Medical/Hemet/pdf/13.pdf
-                                  output/Medical/Hemet/txt/13.txt
-                                  output/Medical/Hemet/json/13.json
+  input/Medical/Imaging/13.pdf  ->  output/Medical/Imaging/pdf/13.pdf
+                                  output/Medical/Imaging/txt/13.txt
+                                  output/Medical/Imaging/json/13.json
   input/loose.pdf             ->  output/pdf/loose.pdf
                                   output/txt/loose.txt
                                   output/json/loose.json

@@ -373,10 +373,10 @@ def _result() -> FileResult:
 
 def test_outputs_land_in_the_folder_the_document_came_from():
     """The default: walk to where the document was and its results are there."""
-    paths = output_paths(Path("/out"), "Medical/Hemet/13.pdf")
-    assert paths["pdf"] == Path("/out/Medical/Hemet/pdf/13.pdf")
-    assert paths["txt"] == Path("/out/Medical/Hemet/txt/13.txt")
-    assert paths["json"] == Path("/out/Medical/Hemet/json/13.json")
+    paths = output_paths(Path("/out"), "Medical/Imaging/13.pdf")
+    assert paths["pdf"] == Path("/out/Medical/Imaging/pdf/13.pdf")
+    assert paths["txt"] == Path("/out/Medical/Imaging/txt/13.txt")
+    assert paths["json"] == Path("/out/Medical/Imaging/json/13.json")
 
 
 def test_a_document_at_the_top_gets_its_folders_at_the_top():

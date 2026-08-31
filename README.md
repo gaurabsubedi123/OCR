@@ -62,7 +62,7 @@ ocr-input/                              ocr-output/
     bills.pdf                               pdf/bills.pdf
                                             txt/bills.txt
                                             json/bills.json
-    Hemet/                                  Hemet/
+    Imaging/                                  Imaging/
       records.pdf                             pdf/records.pdf
                                               txt/records.txt
                                               json/records.json
