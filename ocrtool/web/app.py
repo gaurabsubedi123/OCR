@@ -258,6 +258,7 @@ def api_start_run() -> Any:
         workers=int(payload.get("workers", 0)),
         force_ocr=bool(payload.get("force_ocr", False)),
         deskew=bool(payload.get("deskew", True)),
+        orient=bool(payload.get("orient", True)),
         denoise=bool(payload.get("denoise", True)),
         write_pdf=bool(payload.get("write_pdf", True)),
         write_txt=bool(payload.get("write_txt", True)),

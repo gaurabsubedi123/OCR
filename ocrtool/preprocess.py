@@ -7,6 +7,8 @@ three. Deskewing alone routinely moves a page from unusable to readable.
 The correction is deliberately conservative: it fixes scanner skew, and it
 refuses to guess at anything larger, because a page that is 90 degrees out is
 a rotated page, not a skewed one, and this method cannot tell the difference.
+Quarter turns are a separate question with a separate answer — see `turn` here
+and `_read_turned` in pipeline.py.
 """
 
 from __future__ import annotations
@@ -65,6 +67,35 @@ def preprocess(image: Image.Image, *, deskew: bool = True, denoise: bool = True)
         )
 
     return Preprocessed(image=gray, skew_corrected=round(angle, 2), upscaled=round(scale, 2))
+
+
+# A quarter turn is exact: the pixels are moved, never resampled, so turning a
+# page costs nothing in quality and turning it back returns the original.
+_TURNS = {
+    90: Image.Transpose.ROTATE_270,
+    180: Image.Transpose.ROTATE_180,
+    270: Image.Transpose.ROTATE_90,
+}
+
+
+def turn(image: Image.Image, degrees: int) -> Image.Image:
+    """The page turned `degrees` clockwise, for degrees a multiple of 90.
+
+    Clockwise because that is the direction tesseract's orientation pass counts
+    in, and having the two disagree is the kind of sign error that produces a
+    page upside down instead of right way up.
+
+    PIL's own ROTATE_ constants count anticlockwise, hence the mapping: a
+    clockwise quarter turn is ROTATE_270. These are transposes rather than
+    rotations — they move pixels between rows and columns without interpolating
+    any of them, so nothing is softened.
+    """
+    degrees %= 360
+    if degrees == 0:
+        return image
+    if degrees not in _TURNS:
+        raise ValueError(f"a page can only be turned by a quarter: {degrees}")
+    return image.transpose(_TURNS[degrees])
 
 
 def apply_geometry(image: Image.Image, *, skew: float, size: tuple[int, int]) -> Image.Image:

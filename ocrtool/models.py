@@ -65,6 +65,11 @@ class PageResult:
     width_px: int = 0
     height_px: int = 0
     skew_corrected: float = 0.0
+    # Degrees clockwise this page was turned before it was read, 0 for almost
+    # every page. Non-zero means the scan was sideways or upside down and was
+    # stood up first — worth surfacing, because it says something about the
+    # source document that the text alone does not.
+    rotation_applied: int = 0
     preview: str | None = None
     # The words tesseract was least sure of, kept as plain strings so they
     # survive after the word boxes are dropped from memory. The viewer marks
@@ -93,6 +98,7 @@ class PageResult:
             "duration_ms": self.duration_ms,
             "size_px": [self.width_px, self.height_px],
             "skew_corrected": self.skew_corrected,
+            "rotation_applied": self.rotation_applied,
             "preview": self.preview,
             "low_confidence_words": self.low_confidence_words,
         }
@@ -129,6 +135,7 @@ class PageResult:
             width_px=int(size[0]),
             height_px=int(size[1]),
             skew_corrected=float(data.get("skew_corrected", 0.0)),
+            rotation_applied=int(data.get("rotation_applied", 0)),
             preview=data.get("preview"),
             low_confidence_words=list(data.get("low_confidence_words", [])),
         )

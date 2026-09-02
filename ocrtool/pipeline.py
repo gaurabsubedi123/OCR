@@ -21,9 +21,9 @@ from pathlib import Path
 from .config import MIN_CHARS_FOR_A_REAL_PAGE, Settings
 from .models import PageResult
 from .pdfpage import replace_page_image
-from .preprocess import apply_geometry, preprocess
+from .preprocess import apply_geometry, preprocess, turn
 from .render import render_page, write_preview
-from .tesseract import TesseractFailed, run_tesseract
+from .tesseract import TesseractFailed, run_osd, run_tesseract
 from .textlayer import read_text_layer
 
 # Text-layer pages are never OCR'd, so their picture exists only for the
@@ -112,7 +112,9 @@ def _process(work: PageWork, settings: Settings, started: float) -> PageResult:
         out = run_tesseract(
             cleaned.image, lang=settings.lang, psm=settings.psm, want_pdf=False, dpi=effective_dpi
         )
-        result = _ocr_result(work, out, cleaned.skew_corrected, width, height, preview_rel, started)
+        result = _ocr_result(
+            work, out, cleaned.skew_corrected, width, height, preview_rel, started, 0
+        )
         result.error = f"searchable PDF page not written: {exc}"
         _flag(result, settings)
         return result
@@ -133,6 +135,22 @@ def _process(work: PageWork, settings: Settings, started: float) -> PageResult:
             out = retry
             recovered = True
 
+    # A page that still reads badly may simply be the wrong way up.
+    rotation = 0
+    if settings.orient and _reads_badly(out, settings):
+        turned = _read_turned(
+            image, out, settings, want_pdf=want_pdf, rendered_dpi=rendered.dpi
+        )
+        if turned is not None:
+            rotation, image, cleaned, out, effective_dpi = turned
+            width, height = image.size
+            # The preview is there to be read alongside the text. Once the page
+            # has been stood up, the page as it was read *is* the upright one,
+            # and leaving a sideways picture beside upright text would make
+            # checking the OCR harder than not having the picture at all.
+            if preview_rel is not None and work.preview_dest is not None:
+                write_preview(image, work.preview_dest)
+
     if want_pdf and out.pdf_bytes and work.page_pdf_dest is not None:
         page_pdf = out.pdf_bytes
         if settings.pdf_keeps_source_image:
@@ -145,7 +163,9 @@ def _process(work: PageWork, settings: Settings, started: float) -> PageResult:
         work.page_pdf_dest.parent.mkdir(parents=True, exist_ok=True)
         work.page_pdf_dest.write_bytes(page_pdf)
 
-    result = _ocr_result(work, out, cleaned.skew_corrected, width, height, preview_rel, started)
+    result = _ocr_result(
+        work, out, cleaned.skew_corrected, width, height, preview_rel, started, rotation
+    )
     if recovered:
         result.error = (
             "read on a second pass without the resolution tag — this page's PDF page size "
@@ -153,6 +173,126 @@ def _process(work: PageWork, settings: Settings, started: float) -> PageResult:
         )
     _flag(result, settings)
     return result
+
+
+
+# How much better a turned page has to read before the turn is believed. A
+# couple of points is noise between two recognitions of the same page; this is
+# a gap you only get by actually making the text legible.
+MIN_CONFIDENCE_GAIN = 5.0
+
+# The angles a page can be wrong by, in the order they are tried. Order is
+# worth having an opinion about only because of the early stop below: the
+# sooner the right angle comes up, the fewer recognitions get paid for. On the
+# 358-page claim file here, six of the seven recovered pages wanted 90 and one
+# wanted 180, so 90 leads.
+#
+# Note what is *not* in this list. A page a quarter turn clockwise reads at 94%
+# confidence untouched — tesseract stands that one up by itself and the page
+# never gets this far. It is the other three that need help, and an inverted
+# page is the worst of them: the same page upside down read at 39% and returned
+# `vooododd0O0oIsA9`, which looks like text and is not.
+QUARTER_TURNS = (90, 180, 270)
+
+
+def _reads_badly(out, settings: Settings) -> bool:
+    """Whether this page is poor enough to be worth trying another way up.
+
+    The same bar the page would be flagged for review at, deliberately: a page
+    nobody has to look at is a page not worth spending four recognitions on,
+    and a page somebody does have to look at has already cost more than the
+    second or two this takes.
+    """
+    if not out.text.strip():
+        return True
+    if out.mean_confidence is None:
+        return False
+    return out.mean_confidence < settings.min_confidence
+
+
+def _improves_on(candidate, current) -> bool:
+    """Whether a turned reading is better than the one already in hand.
+
+    This is the whole safety argument for turning pages. Tesseract's
+    orientation pass is a hint and nothing more — measured on this machine it
+    reported 180 with confidence 0.3 and 1.1 on pages that were the right way
+    up, and acting on that alone would have turned correct pages upside down.
+    Judging a turn by the recognition it produces instead means a wrong guess
+    costs a second and changes nothing about the output.
+    """
+    if not candidate.text.strip():
+        return False
+    if not current.text.strip():
+        return True
+    if candidate.mean_confidence is None or current.mean_confidence is None:
+        return False
+    return candidate.mean_confidence > current.mean_confidence + MIN_CONFIDENCE_GAIN
+
+
+def _confidence(out) -> float:
+    return out.mean_confidence if out.mean_confidence is not None else 0.0
+
+
+def _read_turned(image, current, settings: Settings, *, want_pdf: bool, rendered_dpi: int):
+    """Read a badly-read page at other angles and keep the best of them.
+
+    Tesseract's orientation pass goes first because it is cheap — half a second
+    against a second and a half for a recognition — and when it has an opinion
+    it is almost always right. The remaining quarter turns follow, so a page it
+    could not read (a form, a photograph, a full-page stamp: "Too few
+    characters") is still recovered, just for more.
+
+    Stops at the first angle that reads well enough not to need review, which
+    is what keeps the usual cost at one extra recognition rather than three.
+
+    Returns None when nothing read better, and the caller keeps what it had.
+    """
+    osd = run_osd(image)
+    angles = list(QUARTER_TURNS)
+    if osd is not None and osd.rotate:
+        angles.remove(osd.rotate)
+        angles.insert(0, osd.rotate)
+
+    best = None
+    for position, degrees in enumerate(angles):
+        turned = turn(image, degrees)
+        cleaned = preprocess(turned, deskew=settings.deskew, denoise=settings.denoise)
+        dpi = round(rendered_dpi * cleaned.upscaled) if cleaned.upscaled else rendered_dpi
+        try:
+            out = run_tesseract(
+                cleaned.image,
+                lang=settings.lang,
+                psm=settings.psm,
+                want_pdf=want_pdf,
+                dpi=dpi,
+            )
+        except TesseractFailed:
+            continue
+
+        # A page with words on it says *something* at every angle, even upside
+        # down: the inverted exhibit measured here still returned 348 words,
+        # they were simply the wrong ones. A page that yields nothing at two
+        # different angles has nothing on it to find — a photograph, a dark
+        # scan, a sheet of black — and the remaining angles are two more
+        # recognitions spent to learn the same thing. This is what keeps a
+        # folder of photographs from costing four times what it should.
+        if position == 0 and not out.text.strip() and not current.text.strip():
+            break
+
+        # The margin is owed to the reading we already have, not to the other
+        # candidates: it is there to stop a turn being adopted on noise. Once
+        # two angles have both cleared it, the better of the two simply wins.
+        # Charging the margin twice cost a real page here — 311 of the claim
+        # file kept 180 at 56.0 because 90's 56.8 was not five points better
+        # than the turn already in hand.
+        if not _improves_on(out, current):
+            continue
+        if best is not None and _confidence(out) <= _confidence(best[3]):
+            continue
+        best = (degrees, turned, cleaned, out, dpi)
+        if not _reads_badly(out, settings):
+            break  # good enough to stop paying for more angles
+    return best
 
 
 # Below this a word is a guess. Tesseract's scale is optimistic: 60 is already
@@ -163,7 +303,7 @@ LOW_CONFIDENCE_WORD = 60.0
 MAX_LISTED_LOW_WORDS = 80
 
 
-def _ocr_result(work, out, skew, width, height, preview_rel, started) -> PageResult:
+def _ocr_result(work, out, skew, width, height, preview_rel, started, rotation=0) -> PageResult:
     doubtful = [w.text for w in out.words if w.confidence < LOW_CONFIDENCE_WORD]
     return PageResult(
         page_no=work.page_no,
@@ -175,6 +315,7 @@ def _ocr_result(work, out, skew, width, height, preview_rel, started) -> PageRes
         width_px=width,
         height_px=height,
         skew_corrected=skew,
+        rotation_applied=rotation,
         preview=preview_rel,
         low_confidence_words=doubtful[:MAX_LISTED_LOW_WORDS],
     )

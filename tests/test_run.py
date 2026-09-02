@@ -17,9 +17,11 @@ import pypdfium2 as pdfium
 import pytest
 from conftest import colour_page, is_greyscale, needs_tesseract, text_page
 
+from ocrtool.preprocess import turn
+
 from ocrtool.config import Settings
 from ocrtool.models import PageResult
-from ocrtool.pipeline import PageWork
+from ocrtool.pipeline import PageWork, process_page
 from ocrtool.runner import Run, list_runs, load_document, load_run, run_blocking
 
 
@@ -804,3 +806,64 @@ def test_a_stopped_run_resumes_from_a_separate_work_folder(
     assert resumed.status == "done"
     assert resumed.totals.pages_resumed >= 3
     assert (tmp_path / "output" / "txt" / "record.txt").read_text().count("----- page") == 8
+
+
+def _one_page(path: Path) -> PageWork:
+    return PageWork(
+        file_index=0, relpath=path.name, source_path=path, page_no=1,
+        preview_dest=None, preview_rel=None, page_pdf_dest=None,
+    )
+
+
+@needs_tesseract
+@pytest.mark.parametrize("laid", [180, 270])
+def test_a_page_that_is_not_upright_is_stood_up_and_read(tmp_path: Path, laid: int):
+    """The failure this exists for: an inverted page reads as confident nonsense.
+
+    Measured on a real exhibit, an upside-down page came back at 39% confidence
+    reading `vooododd0O0oIsA9` — long enough and plausible enough that neither
+    the character count nor a glance at the file would catch it.
+
+    270 is here alongside 180 because a quarter turn the other way is the one
+    tesseract stands up by itself; this is the direction it does not.
+    """
+    page = tmp_path / "sideways.png"
+    turn(text_page(), laid).save(page)
+
+    settings = Settings(input_dir=".", output_dir=".", orient=True)
+    result = process_page(_one_page(page), settings)
+
+    assert result.rotation_applied == (360 - laid) % 360
+    assert "INCIDENT REPORT" in result.text
+    assert result.confidence is not None and result.confidence > 70
+    assert not result.needs_review
+
+
+@needs_tesseract
+def test_an_upright_page_is_left_alone_and_costs_nothing(tmp_path: Path):
+    page = tmp_path / "upright.png"
+    text_page().save(page)
+    result = process_page(_one_page(page), Settings(input_dir=".", output_dir=".", orient=True))
+    assert result.rotation_applied == 0
+    assert "INCIDENT REPORT" in result.text
+
+
+@needs_tesseract
+def test_turning_can_be_switched_off(tmp_path: Path):
+    """--no-orient leaves the page as it was found, however badly it reads."""
+    page = tmp_path / "sideways.png"
+    turn(text_page(), 180).save(page)
+    result = process_page(_one_page(page), Settings(input_dir=".", output_dir=".", orient=False))
+    assert result.rotation_applied == 0
+    assert "INCIDENT REPORT" not in result.text
+
+
+@needs_tesseract
+def test_the_report_says_which_pages_had_to_be_turned(sample_folder: Path, tmp_path: Path):
+    turn(text_page(["EXHIBIT 9 - UPSIDE DOWN", "Case No. A-00-123456-C"]), 180).save(
+        sample_folder / "inverted.png"
+    )
+    run = run_blocking(_settings(sample_folder, tmp_path))
+    rows = list(csv.DictReader((Path(run.run_dir) / "pages.csv").open()))
+    turned = {r["file"]: r["rotated"] for r in rows if r["rotated"]}
+    assert turned == {"inverted.png": "180"}

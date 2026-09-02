@@ -39,6 +39,7 @@ PAGE_RECIPE_KEYS = (
     "force_ocr",
     "deskew",
     "denoise",
+    "orient",
     "pdf_keeps_source_image",
 )
 

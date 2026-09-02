@@ -61,6 +61,12 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("--workers", type=int, default=0, help=f"parallel pages (default {default_workers()} here)")
     run_cmd.add_argument("--force-ocr", action="store_true", help="OCR every page, even one with a text layer")
     run_cmd.add_argument("--no-deskew", action="store_true", help="do not straighten skewed scans")
+    run_cmd.add_argument(
+        "--no-orient",
+        action="store_true",
+        help="do not try turning a page that reads badly — leave sideways and "
+        "upside-down scans as they are",
+    )
     run_cmd.add_argument("--no-denoise", action="store_true", help="do not despeckle scans")
     run_cmd.add_argument("--no-pdf", action="store_true", help="skip the searchable PDF copies")
     run_cmd.add_argument("--no-txt", action="store_true", help="skip the .txt files")
@@ -172,6 +178,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         workers=args.workers,
         force_ocr=args.force_ocr,
         deskew=not args.no_deskew,
+        orient=not args.no_orient,
         denoise=not args.no_denoise,
         write_pdf=not args.no_pdf,
         write_txt=not args.no_txt,

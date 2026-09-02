@@ -351,6 +351,7 @@ def write_pages_csv(dest: Path, results: Iterable[FileResult]) -> None:
                 "words",
                 "needs_review",
                 "review_reason",
+                "rotated",
                 "seconds",
                 "error",
             ]
@@ -367,6 +368,7 @@ def write_pages_csv(dest: Path, results: Iterable[FileResult]) -> None:
                         page.word_count,
                         "yes" if page.needs_review else "",
                         page.review_reason or "",
+                        page.rotation_applied or "",
                         f"{page.duration_ms / 1000:.1f}",
                         page.error or "",
                     ]

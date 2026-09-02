@@ -29,6 +29,16 @@ from .models import Word
 # keeps one pathological scan from stalling a run of thousands.
 TIMEOUT_SECONDS = 180
 
+# Orientation detection is a layout pass, not a recognition pass, and it does
+# not need the full 300 dpi render. Measured on a 2536x3319 page: 810ms at full
+# size against 485ms at this height, with the reported confidence unchanged
+# (25.1 against 25.4). Below 1600 the confidence collapses and at 900 it starts
+# returning the wrong answer, so this is not a knob to turn down further.
+OSD_HEIGHT_PX = 2000
+# Orientation detection reads a page's layout, not its words; it has no reason
+# to take as long as recognition, and a page it is lost on is one to give up on.
+OSD_TIMEOUT_SECONDS = 60
+
 
 class TesseractMissing(Exception):
     pass
@@ -36,6 +46,25 @@ class TesseractMissing(Exception):
 
 class TesseractFailed(Exception):
     pass
+
+
+@dataclass
+class Osd:
+    """What tesseract's orientation pass makes of a page.
+
+    `rotate` is the correction, not the observation: turn the image this many
+    degrees *clockwise* to stand it upright. Checked against pages turned by
+    hand — a page laid on its side clockwise comes back as 270.
+
+    `confidence` is on tesseract's own scale, which has no units and no ceiling.
+    It is worth reading as a rough sort rather than a probability: measured
+    here, a page with plenty of text scores 8-25 and is invariably right, while
+    everything below about 2 is a guess. Do not act on this number alone.
+    """
+
+    rotate: int
+    confidence: float
+    script: str | None = None
 
 
 @dataclass
@@ -100,6 +129,68 @@ def require_tesseract() -> str:
             "See the Installing tesseract section of README.md."
         )
     return binary
+
+
+def run_osd(image: Image.Image) -> Osd | None:
+    """Which way up tesseract thinks this page is, or None if it will not say.
+
+    `--psm 0` runs orientation and script detection on its own. It needs
+    `osd.traineddata` beside the language data, and it needs enough characters
+    to work from: a near-blank page, a photograph or a full-page stamp makes it
+    exit non-zero with "Too few characters. Skipping this page". That is a
+    normal answer to a fair question, not a failure, so it comes back as None
+    and the caller carries on unturned. A missing osd.traineddata lands in the
+    same place, which is why nothing here has to check for it first.
+    """
+    binary = tesseract_path()
+    if binary is None:
+        return None
+
+    small = image
+    if small.height > OSD_HEIGHT_PX:
+        ratio = OSD_HEIGHT_PX / small.height
+        small = small.resize(
+            (max(1, round(small.width * ratio)), OSD_HEIGHT_PX), Image.LANCZOS
+        )
+
+    with tempfile.TemporaryDirectory(prefix="ocrtool-osd-") as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        small.save(image_path, format="PNG")
+        try:
+            proc = subprocess.run(
+                [binary, str(image_path), "stdout", "--psm", "0"],
+                capture_output=True,
+                text=True,
+                timeout=OSD_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    if proc.returncode != 0:
+        return None
+    return parse_osd(proc.stdout or "")
+
+
+def parse_osd(text: str) -> Osd | None:
+    """Pull the numbers out of what `--psm 0` prints.
+
+    The output is a short block of `Key: value` lines. Anything missing or
+    unparseable means no answer rather than a wrong one.
+    """
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            fields[key.strip().lower()] = value.strip()
+    try:
+        rotate = int(fields["rotate"]) % 360
+        confidence = float(fields["orientation confidence"])
+    except (KeyError, ValueError):
+        return None
+    if rotate not in (0, 90, 180, 270):
+        return None
+    return Osd(rotate=rotate, confidence=confidence, script=fields.get("script") or None)
 
 
 def run_tesseract(

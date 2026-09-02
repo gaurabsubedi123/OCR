@@ -377,6 +377,7 @@ folder is the record, and the UI reads it back.
 | Flag pages below | `--min-confidence` | 70 | Pages under this average word confidence are flagged for review. |
 | OCR every page | `--force-ocr` | off | Ignore text layers PDFs already carry. |
 | Straighten skewed scans | `--no-deskew` to disable | on | Corrects scanner skew up to 6°. |
+| Stand up sideways pages | `--no-orient` to disable | on | A page that reads badly is tried at the other three angles and the best reading kept. Only badly-read pages cost anything. |
 | Remove scanner speckle | `--no-denoise` to disable | on | A 3×3 median filter. |
 | Include subfolders | `--no-recursive` to disable | on | |
 | Write searchable PDFs | `--no-pdf` to disable | on | |
@@ -415,8 +416,8 @@ holds:
 - the source file is unchanged — same size, same modification time
 - every output this run would write is already there
 - it was read with the same settings that matter: resolution, language,
-  segmentation mode, force-OCR, deskew, denoise, and whether the PDF keeps the
-  source image
+  segmentation mode, force-OCR, deskew, denoise, page orientation, and whether
+  the PDF keeps the source image
 
 Anything else — an edited scan, a deleted output, a different resolution — and
 the document is read again. The check errs toward re-reading, because being
@@ -514,7 +515,33 @@ no loss of quality.
 light-end contrast stretch, and a projection-profile deskew that tries angles
 between ±6° and keeps the one where text lines sit squarest. Anything past 6° is
 a rotated page rather than a skewed one, and this method cannot tell those apart,
-so it declines to guess.
+so it declines to guess. Quarter turns are handled separately, below.
+
+**A page that reads badly is tried the other way up.** Scanned exhibits arrive
+sideways and upside down, and an inverted page does not fail loudly — measured
+on a real exhibit here, it came back at 39% confidence reading
+`vooododd0O0oIsA9`: the right number of words, none of them real. Nothing in the
+character count or the file listing catches that.
+
+So any page that would be flagged for review is read again at the other angles
+and the best reading kept. Tesseract's own orientation detector (`--psm 0`) goes
+first because it is cheap, but it is only ever a hint: on this machine it
+reported "180" with confidence 0.3 on pages that were the right way up, and on
+all seven genuinely sideways pages in a 358-page claim file it had no opinion at
+all. **The turn is judged by the recognition it produces, not by what the
+detector says** — a turn is kept only if the page reads at least five points
+better than it did before, so a wrong guess costs a second and changes nothing.
+
+A page a quarter turn *clockwise* never gets this far: tesseract stands that one
+up by itself, at full confidence. It is the other three angles that need help.
+
+Only badly-read pages pay for this, and a page that comes back empty at two
+different angles is abandoned rather than tried at all four — a photograph has
+nothing to find whichever way up it is. Measured on a 361-page folder whose
+OCR'd pages were unusually poor (37 of 43 flagged): 21s with `--no-orient`
+against 36s with it on, recovering nine pages. A folder of ordinary upright
+scans pays almost nothing, because almost nothing in it reads badly enough to
+be tried again.
 
 **The contrast stretch clips only the light end**, and that detail matters. The
 obvious version clips both ends, and on a page whose ink covers less than the

@@ -215,6 +215,10 @@ class Settings:
     force_ocr: bool = False
     deskew: bool = True
     denoise: bool = True
+    # Stand a sideways or upside-down page up before believing what it says.
+    # Only ever acts on a page that already read badly, so a folder of ordinary
+    # upright scans pays nothing for it.
+    orient: bool = True
     write_pdf: bool = True
     write_txt: bool = True
     write_json: bool = True

@@ -29,10 +29,10 @@ from ocrtool.outputs import (
     write_pages_csv,
     write_text,
 )
-from ocrtool.pipeline import _flag
-from ocrtool.preprocess import _estimate_skew, preprocess
+from ocrtool.pipeline import _flag, _improves_on, _reads_badly
+from ocrtool.preprocess import _estimate_skew, preprocess, turn
 from ocrtool.render import _fit, render_page
-from ocrtool.tesseract import parse_tsv
+from ocrtool.tesseract import parse_osd, parse_tsv
 from ocrtool.pdfpage import replace_page_image
 from ocrtool.preprocess import apply_geometry
 from ocrtool.textlayer import _tidy, read_text_layer
@@ -616,3 +616,109 @@ def test_a_document_key_uses_all_of_its_identity():
     assert document_key(f"{sha}|doc.pdf", recipe) != document_key(f"{sha}|copy.pdf", recipe)
     assert document_key(sha, recipe) == document_key(sha, recipe)
     assert document_key(sha, {"dpi": 300}) != document_key(sha, {"dpi": 200})
+
+
+# ------------------------------------------------------- page orientation
+
+
+def test_a_quarter_turn_is_exact_and_reversible():
+    page = text_page()
+    for degrees in (90, 180, 270):
+        there = turn(page, degrees)
+        back = turn(there, 360 - degrees)
+        assert back.size == page.size
+        assert list(back.getdata()) == list(page.getdata())
+
+
+def test_turning_swaps_the_sides_for_a_quarter_but_not_for_a_half():
+    page = text_page(size=(1700, 2200))
+    assert turn(page, 90).size == (2200, 1700)
+    assert turn(page, 270).size == (2200, 1700)
+    assert turn(page, 180).size == (1700, 2200)
+    assert turn(page, 0) is page
+    assert turn(page, 360) is page
+
+
+def test_a_page_can_only_be_turned_by_a_quarter():
+    with pytest.raises(ValueError):
+        turn(text_page(), 45)
+
+
+def test_osd_output_is_read_as_a_clockwise_correction():
+    osd = parse_osd(
+        "Page number: 0\n"
+        "Orientation in degrees: 90\n"
+        "Rotate: 270\n"
+        "Orientation confidence: 21.83\n"
+        "Script: Latin\n"
+        "Script confidence: 3.55\n"
+    )
+    assert osd is not None
+    assert osd.rotate == 270 and osd.confidence == 21.83 and osd.script == "Latin"
+
+
+def test_an_unreadable_orientation_report_is_no_answer_rather_than_a_wrong_one():
+    assert parse_osd("") is None
+    assert parse_osd("Too few characters. Skipping this page") is None
+    # A rotation that is not a quarter turn is not something we can act on.
+    assert parse_osd("Rotate: 45\nOrientation confidence: 9.0\n") is None
+    assert parse_osd("Rotate: 90\nOrientation confidence: not-a-number\n") is None
+
+
+class _Reading:
+    """Stands in for what tesseract returns, for the accept/reject rules."""
+
+    def __init__(self, text: str, confidence: float | None):
+        self.text = text
+        self.mean_confidence = confidence
+
+
+def _settings(**kwargs):
+    return Settings(input_dir=".", output_dir=".", **kwargs)
+
+
+def test_a_page_is_only_turned_when_it_read_badly():
+    settings = _settings(min_confidence=70)
+    assert not _reads_badly(_Reading("clean page", 93.9), settings)
+    assert _reads_badly(_Reading("vooododd0O0oIsA9", 38.75), settings)
+    # Nothing at all is the other way a page fails.
+    assert _reads_badly(_Reading("   ", None), settings)
+    # A page with no confidence to judge and text on it is left alone.
+    assert not _reads_badly(_Reading("from a text layer", None), settings)
+
+
+def test_a_turn_is_kept_only_when_the_page_actually_reads_better():
+    """OSD is a hint. The turn is judged by the recognition it produces.
+
+    Measured on this machine, OSD reported 180 with confidence 0.3 on pages
+    that were the right way up; acting on that alone would have inverted them.
+    """
+    original = _Reading("vooododd0O0oIsA9", 38.75)
+    assert _improves_on(_Reading("100 Example Plaza", 93.9), original)
+    # Noise between two recognitions of the same page is not an improvement.
+    assert not _improves_on(_Reading("vooododd0O0oIsA0", 41.0), original)
+    # Nor is turning a page that was already fine.
+    assert not _improves_on(_Reading("anything", 60.0), _Reading("clean", 93.9))
+
+
+def test_a_turn_that_finds_nothing_never_wins():
+    assert not _improves_on(_Reading("", 99.0), _Reading("real text", 40.0))
+    # ...but finding text where there was none does.
+    assert _improves_on(_Reading("real text", 30.0), _Reading("   ", None))
+
+
+def test_the_rotation_survives_the_trip_through_json():
+    page = PageResult(page_no=1, source="ocr", text="x", rotation_applied=180)
+    assert PageResult.from_dict(page.to_dict()).rotation_applied == 180
+    # A page written before rotations were recorded reads back as unturned.
+    stored = page.to_dict()
+    del stored["rotation_applied"]
+    assert PageResult.from_dict(stored).rotation_applied == 0
+
+
+def test_turning_a_page_changes_the_recipe_so_a_folder_is_read_again():
+    from ocrtool.ledger import recipe
+
+    on = recipe(_settings(orient=True).to_dict())
+    off = recipe(_settings(orient=False).to_dict())
+    assert on != off
