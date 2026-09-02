@@ -22,6 +22,7 @@ from ocrtool.models import FileResult, PageResult, Word
 from ocrtool.cache import document_key
 from ocrtool.outputs import (
     laid_out_text,
+    LAYOUTS,
     output_paths,
     write_json,
     write_pages_csv,
@@ -410,6 +411,32 @@ def test_an_extension_is_replaced_not_appended():
     # `13.pdf` must become `13.txt`, never `13.pdf.txt`.
     assert output_paths(Path("/out"), "13.pdf")["txt"].name == "13.txt"
     assert output_paths(Path("/out"), "photo.jpeg")["pdf"].name == "photo.pdf"
+
+
+def test_a_name_with_dots_in_it_keeps_all_of_it():
+    """`1. Plaintiff_Record.pdf` came out as `1.pdf` — only the extension goes.
+
+    Numbered exhibits are named this way, so the whole folder collapsed onto
+    `1.pdf`, `2.pdf`, each new document overwriting the one before it.
+    """
+    for layout in LAYOUTS:
+        paths = output_paths(Path("/out"), "1. Plaintiff_Record.pdf", layout=layout)
+        assert paths["pdf"].name == "1. Plaintiff_Record.pdf"
+        assert paths["txt"].name == "1. Plaintiff_Record.txt"
+        assert paths["json"].name == "1. Plaintiff_Record.json"
+
+    assert output_paths(Path("/out"), "Dr. Smith notes.pdf")["txt"].name == (
+        "Dr. Smith notes.txt"
+    )
+    assert output_paths(Path("/out"), "Ex 3.2 report.tif")["pdf"].name == (
+        "Ex 3.2 report.pdf"
+    )
+
+
+def test_documents_numbered_the_same_way_do_not_overwrite_each_other():
+    first = output_paths(Path("/out"), "Ex/1. Plaintiff_Record.pdf")
+    second = output_paths(Path("/out"), "Ex/1. Defendant_Record.pdf")
+    assert first["pdf"] != second["pdf"]
 
 
 def test_text_output_marks_each_page_and_its_source(tmp_path: Path):

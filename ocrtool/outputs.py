@@ -69,21 +69,30 @@ def output_paths(
 
     Extensions are replaced, not appended, so `13.pdf` becomes `13.txt` rather
     than `13.pdf.txt`.
+
+    The new extension is joined on as text rather than by `Path.with_suffix`.
+    `with_suffix` replaces everything after the *last* dot in the name, and by
+    that point the name is already the stem, so a document called
+    `1. Plaintiff_Record.pdf` came out as `1.pdf` — the name cut at its first
+    dot, and every `1. …` document in the folder overwriting the last. Dots
+    inside a name are ordinary characters here.
     """
     rel = Path(relpath)
+    names = {kind: f"{rel.stem}.{kind}" for kind in OUTPUT_KINDS}
     if layout == "by-type":
         return {
-            kind: (output_root / kind / rel.parent / rel.stem).with_suffix(f".{kind}")
-            for kind in OUTPUT_KINDS
+            kind: output_root / kind / rel.parent / name
+            for kind, name in names.items()
         }
     if layout == "together":
-        stem_path = output_root / rel.parent / rel.stem
-        return {kind: stem_path.with_suffix(f".{kind}") for kind in OUTPUT_KINDS}
+        return {
+            kind: output_root / rel.parent / name for kind, name in names.items()
+        }
     # by-folder: the kind folder sits inside the document's own folder, so a
     # document deep in the tree keeps its results next to where it came from.
     return {
-        kind: (output_root / rel.parent / kind / rel.stem).with_suffix(f".{kind}")
-        for kind in OUTPUT_KINDS
+        kind: output_root / rel.parent / kind / name
+        for kind, name in names.items()
     }
 
 
