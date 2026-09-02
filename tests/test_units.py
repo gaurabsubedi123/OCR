@@ -23,6 +23,7 @@ from ocrtool.cache import document_key
 from ocrtool.outputs import (
     laid_out_text,
     LAYOUTS,
+    output_basenames,
     output_paths,
     write_json,
     write_pages_csv,
@@ -437,6 +438,75 @@ def test_documents_numbered_the_same_way_do_not_overwrite_each_other():
     first = output_paths(Path("/out"), "Ex/1. Plaintiff_Record.pdf")
     second = output_paths(Path("/out"), "Ex/1. Defendant_Record.pdf")
     assert first["pdf"] != second["pdf"]
+
+
+def test_a_name_with_no_rival_keeps_the_short_form():
+    names = output_basenames(["Ex/13.pdf", "Ex/14.png", "other/13.tif"])
+    assert names == {"Ex/13.pdf": "13", "Ex/14.png": "14", "other/13.tif": "13"}
+
+
+def test_two_documents_differing_only_by_extension_both_survive():
+    """`x.pdf` and `x.png` both wanted `x.txt`; the second overwrote the first."""
+    names = output_basenames(["scan.pdf", "scan.png"])
+    assert names == {"scan.pdf": "scan_pdf", "scan.png": "scan_png"}
+
+    paths = {
+        relpath: output_paths(Path("/out"), relpath, basename=base)
+        for relpath, base in names.items()
+    }
+    assert paths["scan.pdf"]["txt"] == Path("/out/txt/scan_pdf.txt")
+    assert paths["scan.png"]["txt"] == Path("/out/txt/scan_png.txt")
+    assert paths["scan.pdf"]["pdf"] == Path("/out/pdf/scan_pdf.pdf")
+    assert paths["scan.png"]["json"] == Path("/out/json/scan_png.json")
+    for kind in ("pdf", "txt", "json"):
+        assert paths["scan.pdf"][kind] != paths["scan.png"][kind]
+
+
+def test_the_clash_is_judged_per_folder_not_across_the_tree():
+    """The same name in two folders is not a clash — the folders keep them apart."""
+    names = output_basenames(["a/scan.pdf", "b/scan.png"])
+    assert names == {"a/scan.pdf": "scan", "b/scan.png": "scan"}
+
+
+def test_names_that_differ_only_in_case_still_count_as_a_clash():
+    # The results usually land on a Windows drive, where these are one name.
+    names = output_basenames(["Scan.pdf", "scan.png"])
+    assert names == {"Scan.pdf": "Scan_pdf", "scan.png": "scan_png"}
+
+
+def test_the_folded_extension_is_lowercased():
+    names = output_basenames(["scan.PDF", "scan.TIF"])
+    assert names == {"scan.PDF": "scan_pdf", "scan.TIF": "scan_tif"}
+
+
+def test_a_clash_left_over_after_the_rename_is_still_settled():
+    """`x.pdf` and `x.png` take the name `x_pdf`, which `x_pdf.jpg` also wants."""
+    names = output_basenames(["x.pdf", "x.png", "x_pdf.jpg"])
+    assert names["x.pdf"] == "x_pdf"
+    assert names["x.png"] == "x_png"
+    assert names["x_pdf.jpg"] == "x_pdf (2)"
+    assert len(set(names.values())) == 3
+
+
+def test_every_document_in_a_folder_gets_its_own_name():
+    relpaths = ["x.pdf", "x.png", "x.tif", "x_pdf.jpg", "y.pdf", "sub/x.pdf"]
+    names = output_basenames(relpaths)
+    assert len(names) == len(relpaths)
+    for layout in LAYOUTS:
+        written = [
+            output_paths(Path("/out"), relpath, layout=layout, basename=names[relpath])[kind]
+            for relpath in relpaths
+            for kind in ("pdf", "txt", "json")
+        ]
+        assert len(set(written)) == len(written)
+
+
+def test_the_layouts_still_agree_when_a_name_is_disambiguated():
+    for layout in LAYOUTS:
+        paths = output_paths(Path("/out"), "Ex/x.png", layout=layout, basename="x_png")
+        assert paths["txt"].name == "x_png.txt"
+        assert paths["pdf"].name == "x_png.pdf"
+        assert paths["json"].name == "x_png.json"
 
 
 def test_text_output_marks_each_page_and_its_source(tmp_path: Path):

@@ -36,6 +36,7 @@ import csv
 import json
 import logging
 import statistics
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -62,8 +63,71 @@ LAYOUTS = ("by-folder", "by-type", "together")
 DEFAULT_LAYOUT = "by-folder"
 
 
+def output_basenames(relpaths: Iterable[str]) -> dict[str, str]:
+    """The name each document's outputs are built from, keyed by relpath.
+
+    Normally the document's name with its extension taken off, so `13.pdf`
+    gives `13.pdf`, `13.txt` and `13.json`.
+
+    The exception is two documents in one folder whose names differ only by
+    extension — `x.pdf` and `x.png`, which is what a scan kept in two formats
+    looks like. Both wanted `x.txt`, and the second to be written silently
+    replaced the first: two documents in, one file out.
+
+    Those get the source extension folded into the name with an underscore:
+
+        x.pdf  ->  x_pdf.pdf   x_pdf.txt   x_pdf.json
+        x.png  ->  x_png.pdf   x_png.txt   x_png.json
+
+    which says where each came from without the double extension `x.pdf.pdf`
+    that simply keeping the whole name would give.
+
+    Only the clashing documents are spelled that way. One with no rival keeps
+    the short name, because renaming every output to head off a rare clash
+    would be the worse trade.
+
+    Names are compared case-insensitively: the results usually land on a
+    Windows drive, where `X.pdf` and `x.png` collide exactly as surely as the
+    lowercase pair would. The extension is folded in lowercase for the same
+    reason.
+
+    A leftover clash — `x.pdf` and `x.png` taking the name `x_pdf`, in a folder
+    that also holds `x_pdf.jpg` — is settled by ` (2)`, ` (3)`, in the order the
+    documents were discovered, which is sorted. Nothing here can hand back one
+    name twice.
+    """
+    ordered = list(dict.fromkeys(relpaths))
+
+    by_stem: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for relpath in ordered:
+        rel = Path(relpath)
+        by_stem[(str(rel.parent).casefold(), rel.stem.casefold())].append(relpath)
+
+    names: dict[str, str] = {}
+    taken: set[tuple[str, str]] = set()
+    for relpath in ordered:
+        rel = Path(relpath)
+        folder = str(rel.parent).casefold()
+        shared = len(by_stem[(folder, rel.stem.casefold())]) > 1
+        suffix = rel.suffix.lstrip(".").lower()
+        # A document with no extension has nothing to fold in; it falls through
+        # to the numbered form below if the short name is taken.
+        base = f"{rel.stem}_{suffix}" if shared and suffix else rel.stem
+        candidate, attempt = base, 2
+        while (folder, candidate.casefold()) in taken:
+            candidate = f"{base} ({attempt})"
+            attempt += 1
+        taken.add((folder, candidate.casefold()))
+        names[relpath] = candidate
+    return names
+
+
 def output_paths(
-    output_root: Path, relpath: str, *, layout: str = DEFAULT_LAYOUT
+    output_root: Path,
+    relpath: str,
+    *,
+    layout: str = DEFAULT_LAYOUT,
+    basename: str | None = None,
 ) -> dict[str, Path]:
     """Where this document's three outputs go under the chosen layout.
 
@@ -76,9 +140,15 @@ def output_paths(
     `1. Plaintiff_Record.pdf` came out as `1.pdf` — the name cut at its first
     dot, and every `1. …` document in the folder overwriting the last. Dots
     inside a name are ordinary characters here.
+
+    `basename` overrides the name the outputs are built from, and is how a run
+    passes in what `output_basenames` decided for the whole folder. On its own
+    this function can only see one document, and a collision is by definition
+    something you need two to notice.
     """
     rel = Path(relpath)
-    names = {kind: f"{rel.stem}.{kind}" for kind in OUTPUT_KINDS}
+    base = rel.stem if basename is None else basename
+    names = {kind: f"{base}.{kind}" for kind in OUTPUT_KINDS}
     if layout == "by-type":
         return {
             kind: output_root / kind / rel.parent / name

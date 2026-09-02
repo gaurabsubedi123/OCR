@@ -35,6 +35,7 @@ from .ledger import Ledger, LedgerEntry, page_recipe, recipe
 from .models import FileResult, PageResult
 from .outputs import (
     now_iso,
+    output_basenames,
     output_paths,
     write_json,
     write_pages_csv,
@@ -112,6 +113,11 @@ class Run:
         self._resumed: dict[int, dict[int, PageResult]] = {}
         # Each document's content hash, so the ledger can record it.
         self._sha_by_index: dict[int, str] = {}
+        # The name each document's outputs are built from, decided across the
+        # whole folder once discovery is in, because a name that clashes can
+        # only be spotted next to the one it clashes with. Empty until then,
+        # and a missing entry falls back to the document's own stem.
+        self._basenames: dict[str, str] = {}
 
     # ---------------------------------------------------------------- paths
 
@@ -129,7 +135,10 @@ class Run:
     def wanted_paths(self, relpath: str) -> dict[str, Path]:
         """Where this document's outputs go, limited to the kinds this run writes."""
         paths = output_paths(
-            self.settings.output_path, relpath, layout=self.settings.output_layout
+            self.settings.output_path,
+            relpath,
+            layout=self.settings.output_layout,
+            basename=self._basenames.get(relpath),
         )
         return {
             kind: path
@@ -278,6 +287,9 @@ class Run:
 
     def _discover(self) -> None:
         found = find_documents(self.settings.input_path, recursive=self.settings.recursive)
+        # Before the loop: _reuse_if_done asks where this document's outputs
+        # go, and the answer depends on what else was found.
+        self._basenames = output_basenames([item.relpath for item in found])
         with self._lock:
             for index, item in enumerate(found):
                 result = FileResult(
@@ -767,7 +779,12 @@ class Run:
 
     def _write_outputs(self, index: int, result: FileResult) -> None:
         out_root = self.settings.output_path
-        paths = output_paths(out_root, result.relpath, layout=self.settings.output_layout)
+        paths = output_paths(
+            out_root,
+            result.relpath,
+            layout=self.settings.output_layout,
+            basename=self._basenames.get(result.relpath),
+        )
         written: dict[str, str] = {}
 
         if self.settings.write_txt:
