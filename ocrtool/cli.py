@@ -236,6 +236,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     f"  {summary['status']:9} {summary['relpath']}  "
                     f"({summary['pages_done']} pages{note}){err}"
                 )
+        elif kind == "log" and not args.quiet:
+            # Where the "Stopping — finishing the pages already in flight"
+            # notice comes from, which is the one a person needs to see.
+            _clear(state)
+            print(event.get("message", ""))
         elif kind == "progress" and not args.quiet:
             run = event["run"]
             totals = run["totals"]
@@ -270,6 +275,12 @@ def _report(run: Run) -> int:
         )
     print(f"Flagged   {totals.pages_flagged} pages need a look")
     print(f"Time      {_duration(run.elapsed_s)}")
+    if run.status == "cancelled":
+        # Nothing is lost by stopping, but that is only obvious if it is said.
+        print(
+            "Stopped   every page read so far is saved — run the same command "
+            "again to carry on from here"
+        )
     print(f"Output    {run.settings.output_path}")
     print(f"Report    {run.run_dir / 'pages.csv'}")
     if run.error:

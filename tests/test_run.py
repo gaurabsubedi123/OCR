@@ -903,3 +903,38 @@ def test_a_page_both_turned_and_off_square_is_recovered(tmp_path: Path):
 
     assert result.rotation_applied == 180
     assert "INCIDENT REPORT" in result.text
+
+
+@needs_tesseract
+def test_ctrl_c_stops_a_run_instead_of_raising_through_it(long_document: Path, tmp_path: Path):
+    """Ctrl-C used to print a Python traceback, which reads like a crash.
+
+    Nothing was actually lost — pages are written as they are read — but a
+    traceback is no way to say so, and it left the run reported as neither done
+    nor cancelled. Raising KeyboardInterrupt out of the event callback is what
+    a Ctrl-C does to the drain loop.
+    """
+    seen = []
+
+    def on_event(event):
+        seen.append(event)
+        if sum(1 for e in seen if e.get("type") == "page") >= 2:
+            raise KeyboardInterrupt
+
+    run = run_blocking(_settings(long_document, tmp_path, workers=1), on_event=on_event)
+
+    assert run.status == "cancelled"
+    assert run.totals.pages_done >= 2
+    # And the pages it did read are on disk for the next run to pick up.
+    assert list((tmp_path / "output" / "_cache").rglob("p*.json"))
+
+
+@needs_tesseract
+def test_a_second_ctrl_c_does_not_escape_either(long_document: Path, tmp_path: Path):
+    """Impatience must not turn into a traceback either."""
+
+    def on_event(event):
+        raise KeyboardInterrupt
+
+    run = run_blocking(_settings(long_document, tmp_path, workers=1), on_event=on_event)
+    assert run.status in {"cancelled", "done"}

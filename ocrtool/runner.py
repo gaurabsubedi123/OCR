@@ -903,6 +903,11 @@ def list_runs(work_dir: Path) -> list[dict[str, Any]]:
     return runs
 
 
+# How long a cancelled run is given to finish the pages already in flight
+# before the CLI reports what it has. A page is at most a couple of seconds.
+CANCEL_GRACE_SECONDS = 120
+
+
 def load_document(work_dir: Path, run_id: str, file_index: int) -> dict[str, Any] | None:
     path = Path(work_dir) / "_runs" / run_id / "pages" / f"{file_index}.json"
     if not path.is_file():
@@ -914,14 +919,35 @@ def load_document(work_dir: Path, run_id: str, file_index: int) -> dict[str, Any
 
 
 def run_blocking(settings: Settings, *, on_event: Callable[[dict[str, Any]], None] | None = None) -> Run:
-    """Run to completion on this thread. Used by the CLI and the tests."""
+    """Run to completion on this thread. Used by the CLI and the tests.
+
+    Ctrl-C stops the run the same way the browser's Stop button does: the pages
+    already in flight are finished, everything read so far is kept, and the run
+    reports itself as cancelled. It used to raise straight through the drain
+    loop and print a Python traceback, which reads like a crash and gives no
+    hint that nothing was lost.
+
+    A second Ctrl-C gives up waiting for the pages in flight and reports what
+    is already in hand — the pages themselves are on disk either way, because
+    each is written as it is read.
+    """
     run = Run(settings)
     q = run.subscribe() if on_event else None
     run.start()
-    if q is not None and on_event is not None:
-        for event in _drain(run, q):
-            on_event(event)
-    run.join()
+    try:
+        if q is not None and on_event is not None:
+            for event in _drain(run, q):
+                on_event(event)
+        run.join()
+    except KeyboardInterrupt:
+        run.cancel()
+        if q is not None and on_event is not None:
+            try:
+                for event in _drain(run, q):
+                    on_event(event)
+            except KeyboardInterrupt:
+                pass
+        run.join(timeout=CANCEL_GRACE_SECONDS)
     return run
 
 

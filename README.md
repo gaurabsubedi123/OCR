@@ -74,12 +74,28 @@ ocr-input/                              ocr-output/
 | `…/txt/name.txt` | The text, laid out the way the page was — columns, tables and forms stay lined up — with a `----- page 3 (ocr) -----` marker before each page saying where that page's text came from. |
 | `…/json/name.json` | Per page: the text, tesseract's confidence, whether it was flagged, and every word with its position on the page image. |
 
+**The name is your name.** Only the extension changes, so
+`1. Plaintiff_Record.pdf` becomes `1. Plaintiff_Record.txt`. Dots inside a name
+are ordinary characters — a numbered exhibit keeps its number *and* its title.
+
+The one exception is two documents in a folder that differ only by extension,
+`scan.pdf` and `scan.png`, which is what a scan kept in two formats looks like.
+Both would want `scan.txt`, so each folds its own extension in:
+
+```
+scan.pdf  ->  scan_pdf.pdf   scan_pdf.txt   scan_pdf.json
+scan.png  ->  scan_png.pdf   scan_png.txt   scan_png.json
+```
+
+Only the clashing pair is renamed; everything else keeps the short name. No two
+documents can ever be written to the same path, in any of the three layouts.
+
 And for the run as a whole:
 
 | Path | What it is |
 | --- | --- |
 | `_previews/<document>/p0001.jpg` | A screen-sized picture of every page. This is what lets you check a result against the page it came from. `--no-previews` skips them; the viewer then has nothing to show a page against. |
-| `_runs/<run-id>/pages.csv` | One row per page: source, confidence, characters, seconds, and why it was flagged. Sort by confidence to find what to check first. |
+| `_runs/<run-id>/pages.csv` | One row per page: source, confidence, characters, seconds, whether the page had to be turned, and why it was flagged. Sort by confidence to find what to check first. |
 | `_runs/<run-id>/manifest.json` | The full record of the run: settings, timings, per-file results. |
 | `_runs/<run-id>/events.jsonl` | What happened, in order, as it happened. |
 
@@ -283,10 +299,29 @@ It listens on `127.0.0.1` — this machine only, not your network.
 
 **1 — Where the documents are.** Either *Point at a folder*, which reads the
 files where they already are and copies nothing, or *Upload files*, which
-accepts a drag-and-drop, a multi-file pick, or a whole folder. As soon as a
-folder path is entered the page tells you what it found: `12 documents · 2,063
-pages`, the first dozen files, and any file that could not be opened. That count
-comes from the same code the run uses, so it is a promise rather than a guess.
+accepts a drag-and-drop, a multi-file pick, or a whole folder.
+
+As soon as a folder path is entered the page shows what it found, as the folder
+tree it actually is rather than a list of paths — every folder carrying a count
+of the documents and pages beneath it, closed until you open it:
+
+```
+61 documents · 1,944 pages · 1 new, 60 already read
+
+▼ Exhibits                        10 files · 340 pages   [1 NEW]
+   ▶ Billing                       2 files ·  40 pages
+   ▼ Medical                       4 files · 120 pages   [1 NEW]
+        1. Intake.pdf                   4 pages   ALREADY READ
+        2. Radiology.pdf               12 pages   ALREADY READ
+        3. MRI 09-2019.pdf              6 pages   NEW
+```
+
+**Documents this folder has already been through are marked**, so adding one
+file to a folder of two thousand shows you that one file and carries the count
+up through every folder above it. That is the run's own ledger answering, with
+the run's own rule, so it is a promise rather than a guess — which is also why
+the preview is asked again when you change a setting that would change the
+answer. Files that could not be opened are called out separately.
 
 **2 — Where the results go.** Any folder; it is created if it does not exist.
 The page states exactly what will be written into it.
@@ -301,7 +336,8 @@ Then **Start reading**, and the run page shows, live:
 - **which pages are being read right now**, by name
 - **speed** in pages per second, measured, and an estimate of the time left
 - **every page as it finishes**, with its confidence and its flags
-- **each document** as it is written, with links to its PDF, text, and JSON
+- **each document** in the same folder tree, with its own progress bar while it
+  is being read, and links to its PDF, text and JSON once it is written
 
 You can open a finished document while the rest of the run continues, stop the
 run at any point — anything already read is still written — and search the text
@@ -477,6 +513,20 @@ folder already holds and it costs a file copy, not a reading.
 
 ## Stopping a run costs nothing
 
+**How to stop one.** Ctrl-C in the terminal, or the Stop button in the browser.
+Both do the same thing: the pages already in flight are finished, everything
+read so far is kept, and the run reports itself as `cancelled`. There is no
+separate resume command — run the same command again and it carries on.
+
+```
+Stopping — finishing the pages already in flight.
+  cancelled Exhibits/scan.pdf  (171 pages, 15 flagged)
+
+Status    cancelled
+Stopped   every page read so far is saved — run the same command again to
+          carry on from here
+```
+
 Every page is written to disk the moment it is read. Start again and it picks
 up from the first page that never arrived:
 
@@ -496,6 +546,15 @@ finds its own pages, and pages read at a different resolution are never resumed
 onto. A document's folder is deleted the moment it is fully written out, which
 means `_cache/` only ever holds work that is genuinely unfinished. It is safe
 to delete: it costs the time to read those pages again, nothing more.
+
+Two things worth knowing about what gets picked up. A document that had already
+been *finished* by an earlier run is skipped outright by the ledger and never
+reaches the cache at all. And a page is only resumed when everything needed to
+assemble the output is there — with searchable PDFs switched on that means the
+page's own PDF as well as its text — so what gets picked up is the OCR, which
+is the part that cost the time. Pages that came from a PDF's own text layer are
+simply read again, because they are close to free and their PDF page comes from
+the source document.
 
 Changing how the `.txt` is laid out rewrites the files without discarding the
 pages, because it does not change what a page is — only what is written from it.
@@ -686,7 +745,7 @@ Stated plainly, because each of these is a thing OCR tools are assumed to do:
 ## Development
 
 ```bash
-.venv/bin/python -m pytest -q          # 76 tests, about 30 seconds
+.venv/bin/python -m pytest -q          # 160 tests, about two and a half minutes
 ```
 
 Tests that need the tesseract binary skip themselves when it is absent. No test
