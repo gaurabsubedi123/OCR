@@ -17,7 +17,7 @@ from ocrtool.config import (
     save_default_folders,
 )
 from ocrtool.ledger import Ledger, LedgerEntry, recipe
-from ocrtool.discover import find_documents
+from ocrtool.discover import document_tree, find_documents, natural_key
 from ocrtool.models import FileResult, PageResult, Word
 from ocrtool.cache import document_key
 from ocrtool.outputs import (
@@ -774,3 +774,86 @@ def test_turning_a_page_changes_the_recipe_so_a_folder_is_read_again():
     on = recipe(_settings(orient=True).to_dict())
     off = recipe(_settings(orient=False).to_dict())
     assert on != off
+
+
+# ------------------------------------------------- order and the folder tree
+
+
+def test_numbers_in_names_sort_as_numbers():
+    """Exhibits are numbered, and text order lists them 1, 10, 11, 2, 20."""
+    names = ["10. Ex.pdf", "2. Ex.pdf", "1. Ex.pdf", "20. Ex.pdf", "11. Ex.pdf", "3. Ex.pdf"]
+    assert sorted(names, key=natural_key) == [
+        "1. Ex.pdf", "2. Ex.pdf", "3. Ex.pdf", "10. Ex.pdf", "11. Ex.pdf", "20. Ex.pdf",
+    ]
+
+
+def test_natural_order_never_compares_a_number_against_a_word():
+    """The usual way of writing this raises TypeError on `2` against `2a`."""
+    assert sorted(["2a", "2", "10b", "10"], key=natural_key) == ["2", "2a", "10", "10b"]
+    assert sorted(["a", "1", ""], key=natural_key) == ["", "1", "a"]
+
+
+def test_case_does_not_decide_the_order():
+    assert sorted(["beta.pdf", "Alpha.pdf"], key=natural_key) == ["Alpha.pdf", "beta.pdf"]
+
+
+def test_documents_are_discovered_in_natural_order(tmp_path: Path):
+    folder = tmp_path / "in"
+    (folder / "Ex").mkdir(parents=True)
+    for name in ("10. c.png", "2. b.png", "1. a.png"):
+        text_page(["x"], size=(300, 200)).save(folder / "Ex" / name)
+    found = find_documents(folder)
+    assert [Path(f.relpath).name for f in found] == ["1. a.png", "2. b.png", "10. c.png"]
+
+
+def _found(*pairs):
+    from ocrtool.discover import Discovered
+
+    return [Discovered(Path(rel), rel, 100, pages) for rel, pages in pairs]
+
+
+def test_the_tree_nests_folders_and_counts_everything_beneath_them():
+    tree = document_tree(_found(
+        ("a.pdf", 1),
+        ("Medical/1. Intake.pdf", 2),
+        ("Medical/Imaging/13.pdf", 5),
+    ))
+    assert tree["files"] == 3 and tree["pages"] == 8
+    assert [d["name"] for d in tree["documents"]] == ["a.pdf"]
+
+    medical = tree["folders"][0]
+    assert medical["name"] == "Medical"
+    # Recursive: its own document plus the one in Imaging below it.
+    assert medical["files"] == 2 and medical["pages"] == 7
+    assert medical["folders"][0]["name"] == "Imaging"
+    assert medical["folders"][0]["files"] == 1
+
+
+def test_the_tree_is_in_natural_order_at_every_level():
+    tree = document_tree(_found(
+        ("10. b.pdf", 1), ("2. a.pdf", 1), ("Z/1.pdf", 1), ("A/1.pdf", 1),
+    ))
+    assert [d["name"] for d in tree["documents"]] == ["2. a.pdf", "10. b.pdf"]
+    assert [f["name"] for f in tree["folders"]] == ["A", "Z"]
+
+
+def test_an_empty_folder_makes_an_empty_tree():
+    tree = document_tree([])
+    assert tree["files"] == 0 and tree["documents"] == [] and tree["folders"] == []
+
+
+def test_a_document_reports_its_progress_before_it_has_finished():
+    """The count the browser shows when a tab is opened mid-document.
+
+    `pages` is filled in one go when the whole document is collected, so until
+    then it is empty. Reading progress from it alone reported zero, and leaving
+    the run page and coming back restarted every document's count from nothing
+    while the total at the top carried on correctly.
+    """
+    result = FileResult(relpath="scan.pdf", source_path="/scan.pdf", size_bytes=10, page_count=12)
+    result.pages_read = 4
+    assert result.summary()["pages_done"] == 4
+
+    # Once collected, the pages themselves are the better answer.
+    result.pages = [PageResult(page_no=n, source="ocr", text="x") for n in range(1, 13)]
+    assert result.summary()["pages_done"] == 12

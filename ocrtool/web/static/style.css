@@ -259,3 +259,89 @@ td.path { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
 .hit:hover { background: var(--panel-2); }
 .hit .where { font-size: 12px; color: var(--ink-faint); font-family: var(--mono); margin-bottom: 3px; }
 .hit mark { background: var(--accent-soft); color: var(--accent); }
+
+/* ------------------------------------------------------------------ trees
+   The folder preview and the run's document list. Rows are flat in the DOM and
+   indented by padding, so opening a folder never reflows anything above it. */
+
+.tree { font-size: 13.5px; }
+
+.tree-folder,
+.tree-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  padding-right: 6px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.tree-folder {
+  cursor: pointer;
+  font-weight: 600;
+  background: var(--panel-2);
+  border-bottom-color: var(--line);
+  user-select: none;
+}
+
+.tree-folder:hover { background: var(--accent-soft); }
+
+.tree-folder .twist {
+  width: 12px;
+  flex: none;
+  font-size: 9px;
+  color: var(--ink-faint);
+}
+
+.tree-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-file .tree-name { font-weight: 400; }
+.tree-file .tree-name.clickable { cursor: pointer; color: var(--accent); }
+.tree-file .tree-name.clickable:hover { text-decoration: underline; }
+
+.tree-count {
+  flex: none;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+}
+
+.tree-state {
+  flex: none;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+
+.tree-state.new { background: var(--good-soft); color: var(--good); }
+.tree-state.done { background: var(--line-soft); color: var(--ink-faint); }
+.tree-state.bad { background: var(--bad-soft); color: var(--bad); }
+
+.tree-outputs { flex: none; display: flex; gap: 8px; }
+
+/* A per-document progress bar, so a long document is visibly moving rather
+   than sitting on "running" for four minutes. */
+.mini-bar {
+  flex: none;
+  width: 56px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.mini-bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width .2s ease;
+}

@@ -42,8 +42,9 @@ from ..config import (
     default_folders,
     default_workers,
 )
-from ..outputs import DEFAULT_LAYOUT
-from ..discover import find_documents
+from ..outputs import DEFAULT_LAYOUT, output_basenames, output_paths
+from ..discover import document_tree, find_documents
+from ..ledger import Ledger
 from ..runner import Run, load_document, load_run
 from ..tesseract import installed_languages, tesseract_path, tesseract_version
 from .state import Registry
@@ -166,34 +167,148 @@ def api_browse() -> Any:
     )
 
 
-@bp.get("/api/preview-folder")
-def api_preview_folder() -> Any:
-    """Count what a run would actually process, before committing to it.
+def _settings_from_payload(payload: dict, *, input_dir: str, output_dir: str) -> Settings:
+    """The Settings a run would use, built from what the browser form holds.
 
-    Discovery is the same code the run uses, so this is a promise the run keeps
-    rather than an estimate that turns out differently.
+    Shared with the folder preview so that "already read" there means the same
+    thing it will mean when the run starts. The check depends on the recipe —
+    resolution, language, deskew and the rest — so a preview built from
+    different settings than the run would be a different question answered
+    confidently.
     """
-    raw = request.args.get("path", "")
-    recursive = request.args.get("recursive", "1") != "0"
+    return Settings(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        work_dir=str(payload.get("work_dir") or ""),
+        dpi=int(payload.get("dpi", DEFAULT_DPI)),
+        lang=str(payload.get("lang", "eng")),
+        psm=int(payload.get("psm", DEFAULT_PSM)),
+        workers=int(payload.get("workers", 0)),
+        force_ocr=bool(payload.get("force_ocr", False)),
+        deskew=bool(payload.get("deskew", True)),
+        orient=bool(payload.get("orient", True)),
+        denoise=bool(payload.get("denoise", True)),
+        write_pdf=bool(payload.get("write_pdf", True)),
+        write_txt=bool(payload.get("write_txt", True)),
+        write_json=bool(payload.get("write_json", True)),
+        include_word_boxes=bool(payload.get("include_word_boxes", True)),
+        write_previews=bool(payload.get("write_previews", True)),
+        pdf_keeps_source_image=bool(payload.get("pdf_keeps_source_image", True)),
+        txt_keeps_layout=bool(payload.get("txt_keeps_layout", True)),
+        duplicates=str(payload.get("duplicates", DEFAULT_DUPLICATES)),
+        output_layout=str(payload.get("output_layout", DEFAULT_LAYOUT)),
+        skip_already_done=bool(payload.get("skip_already_done", True)),
+        min_confidence=float(payload.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
+        recursive=bool(payload.get("recursive", True)),
+    )
+
+
+def _already_read(found: list, settings: Settings) -> dict[str, str]:
+    """Which of these documents this output folder has already been through.
+
+    Answered with the run's own ledger and the run's own rule, so adding one
+    file to a folder of two thousand shows exactly the one that will be read.
+    Any trouble reading the ledger means "nothing is known to be done", which
+    errs toward offering to read rather than toward claiming work is finished.
+    """
+    if not settings.skip_already_done:
+        return {}
+    try:
+        ledger = Ledger(settings.work_path, settings.output_path)
+    except OSError:
+        return {}
+    if not len(ledger):
+        return {}
+
+    names = output_basenames([item.relpath for item in found])
+    recipe = settings.to_dict()
+    kinds = [kind for kind in ("pdf", "txt", "json") if getattr(settings, f"write_{kind}")]
+    done: dict[str, str] = {}
+    for item in found:
+        paths = output_paths(
+            settings.output_path,
+            item.relpath,
+            layout=settings.output_layout,
+            basename=names[item.relpath],
+        )
+        entry = ledger.already_done(
+            item.relpath,
+            size=item.size_bytes,
+            mtime=item.modified,
+            settings=recipe,
+            wanted={kind: paths[kind] for kind in kinds},
+        )
+        if entry is not None:
+            done[item.relpath] = entry.run_id
+    return done
+
+
+def _mark_tree(node: dict, done: dict[str, str]) -> dict:
+    """Add per-document state and per-folder new/done counts to a tree."""
+    new_count = 0
+    done_count = 0
+    for document in node["documents"]:
+        run_id = done.get(document["path"])
+        document["state"] = "done" if run_id else "new"
+        document["done_in"] = run_id
+        if run_id:
+            done_count += 1
+        else:
+            new_count += 1
+    for child in node["folders"]:
+        _mark_tree(child, done)
+        new_count += child["new"]
+        done_count += child["done"]
+    node["new"] = new_count
+    node["done"] = done_count
+    return node
+
+
+@bp.post("/api/preview-folder")
+def api_preview_folder() -> Any:
+    """What a run would actually do, before committing to it.
+
+    Discovery is the same code the run uses and the already-read check is the
+    run's own, so this is a promise the run keeps rather than an estimate that
+    turns out differently. It takes the whole settings payload for that reason:
+    whether a document counts as already read depends on the recipe.
+
+    The answer is the folder tree rather than a flat list. A case folder is
+    organised by its folders, and twelve rows of `a/b/c.pdf` with "and 1,932
+    more" underneath says nothing about the shape of what you are about to run.
+    """
+    payload = request.get_json(silent=True) or {}
+    raw = (payload.get("path") or "").strip()
     path = Path(raw).expanduser()
     if not raw or not path.is_dir():
         return jsonify({"error": "not a folder", "path": raw}), 400
+
+    settings = _settings_from_payload(
+        payload,
+        input_dir=str(path),
+        output_dir=(payload.get("output_dir") or "").strip() or str(path),
+    )
     try:
-        found = find_documents(path, recursive=recursive)
+        found = find_documents(path, recursive=settings.recursive)
     except OSError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    pages = sum(f.page_count for f in found)
+    try:
+        done = _already_read(found, settings) if payload.get("output_dir") else {}
+    except Exception:  # noqa: BLE001 - a preview must never be the thing that fails
+        done = {}
+
+    tree = _mark_tree(document_tree(found), done)
     return jsonify(
         {
             "path": str(path.resolve()),
+            "name": path.name or str(path),
             "files": len(found),
-            "pages": pages,
+            "pages": sum(f.page_count for f in found),
+            "new": tree["new"],
+            "done": tree["done"],
             "unreadable": [{"file": f.relpath, "error": f.error} for f in found if f.error],
-            "sample": [
-                {"file": f.relpath, "pages": f.page_count, "bytes": f.size_bytes}
-                for f in found[:12]
-            ],
+            "tree": tree,
         }
     )
 
@@ -248,31 +363,7 @@ def api_start_run() -> Any:
     if tesseract_path() is None:
         return jsonify({"error": "tesseract was not found on this machine — see the README"}), 400
 
-    settings = Settings(
-        input_dir=input_dir,
-        output_dir=output_dir,
-        work_dir=str(payload.get("work_dir") or ""),
-        dpi=int(payload.get("dpi", DEFAULT_DPI)),
-        lang=str(payload.get("lang", "eng")),
-        psm=int(payload.get("psm", DEFAULT_PSM)),
-        workers=int(payload.get("workers", 0)),
-        force_ocr=bool(payload.get("force_ocr", False)),
-        deskew=bool(payload.get("deskew", True)),
-        orient=bool(payload.get("orient", True)),
-        denoise=bool(payload.get("denoise", True)),
-        write_pdf=bool(payload.get("write_pdf", True)),
-        write_txt=bool(payload.get("write_txt", True)),
-        write_json=bool(payload.get("write_json", True)),
-        include_word_boxes=bool(payload.get("include_word_boxes", True)),
-        write_previews=bool(payload.get("write_previews", True)),
-        pdf_keeps_source_image=bool(payload.get("pdf_keeps_source_image", True)),
-        txt_keeps_layout=bool(payload.get("txt_keeps_layout", True)),
-        duplicates=str(payload.get("duplicates", DEFAULT_DUPLICATES)),
-        output_layout=str(payload.get("output_layout", DEFAULT_LAYOUT)),
-        skip_already_done=bool(payload.get("skip_already_done", True)),
-        min_confidence=float(payload.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
-        recursive=bool(payload.get("recursive", True)),
-    )
+    settings = _settings_from_payload(payload, input_dir=input_dir, output_dir=output_dir)
 
     try:
         settings.output_path.mkdir(parents=True, exist_ok=True)

@@ -164,6 +164,13 @@ class FileResult:
     # How many of this document's pages came from a stopped run rather than
     # being read again.
     resumed_pages: int = 0
+    # Pages finished so far, counted as each one lands. `pages` below is not a
+    # substitute: it is filled in one go when the whole document is collected,
+    # so until then it is empty and a progress figure taken from it reads zero.
+    # The browser used to count these itself from the live event stream, which
+    # meant leaving the page and coming back restarted every document's count
+    # from nothing while the total at the top carried on correctly.
+    pages_read: int = 0
 
     @property
     def ocr_pages(self) -> int:
@@ -190,7 +197,9 @@ class FileResult:
             "size_bytes": self.size_bytes,
             "status": self.status,
             "page_count": self.page_count,
-            "pages_done": len(self.pages),
+            # Whichever knows more: the running count while a document is
+            # being read, the collected pages once it has been.
+            "pages_done": max(len(self.pages), self.pages_read),
             "ocr_pages": self.ocr_pages,
             "text_layer_pages": self.text_layer_pages,
             "flagged_pages": self.flagged_pages,

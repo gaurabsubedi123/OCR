@@ -643,6 +643,9 @@ class Run:
             self.publish({"type": "file", "summary": file_result.summary()})
 
         with self._lock:
+            # Per document as well as in total, so that a snapshot taken in the
+            # middle of a document tells the truth about it.
+            file_result.pages_read += 1
             self.totals.pages_done += 1
             self.totals.chars += page.char_count
             if page.source == "ocr":

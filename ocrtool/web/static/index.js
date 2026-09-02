@@ -59,7 +59,10 @@ async function checkFolder() {
   report.replaceChildren(el('div', { class: 'soft', style: 'font-size:13.5px' }, 'Looking…'));
   let data;
   try {
-    data = await getJSON(`/api/preview-folder?path=${encodeURIComponent(path)}&recursive=${$('#recursive').checked ? 1 : 0}`);
+    // POSTed with the whole form: whether a document counts as already read
+    // depends on the settings the run would use, so the preview has to ask the
+    // same question the run will.
+    data = await postJSON('/api/preview-folder', { ...settingsPayload(), path });
   } catch (err) {
     report.replaceChildren(el('div', { class: 'notice bad' }, String(err.message)));
     refreshReadiness();
@@ -71,22 +74,8 @@ async function checkFolder() {
   if (!data.files) {
     nodes.push(el('div', { class: 'notice warn' }, 'No PDFs or images in that folder.'));
   } else {
-    nodes.push(el('div', { class: 'notice good' },
-      `${num(data.files)} documents · ${num(data.pages)} pages`));
-    const table = el('table');
-    table.append(el('tr', {},
-      el('th', {}, 'file'), el('th', { class: 'num' }, 'pages'), el('th', { class: 'num' }, 'size')));
-    for (const item of data.sample) {
-      table.append(el('tr', {},
-        el('td', { class: 'path' }, item.file),
-        el('td', { class: 'num' }, num(item.pages)),
-        el('td', { class: 'num dim' }, bytes(item.bytes))));
-    }
-    if (data.files > data.sample.length) {
-      table.append(el('tr', {}, el('td', { class: 'dim', colspan: '3' },
-        `…and ${num(data.files - data.sample.length)} more`)));
-    }
-    nodes.push(el('div', { class: 'scroll' }, table));
+    nodes.push(el('div', { class: 'notice good' }, headline(data)));
+    nodes.push(el('div', { class: 'tree scroll' }, ...previewTree(data)));
   }
   if (data.unreadable && data.unreadable.length) {
     nodes.push(el('div', { class: 'notice warn mt' },
@@ -95,6 +84,41 @@ async function checkFolder() {
   }
   report.replaceChildren(...nodes);
   refreshReadiness();
+}
+
+function headline(data) {
+  const bits = [`${num(data.files)} documents · ${num(data.pages)} pages`];
+  // Only worth saying when the folder is not simply all-new, which is what it
+  // is the first time and the only time the distinction means nothing.
+  if (data.done) {
+    bits.push(data.new
+      ? `${num(data.new)} new, ${num(data.done)} already read`
+      : 'all already read — nothing to do');
+  }
+  return bits.join(' · ');
+}
+
+const previewOpen = makeTreeState();
+
+function previewTree(data) {
+  return renderTree(data.tree, {
+    open: previewOpen,
+    onToggle: () => {
+      $('#folder-report .tree').replaceChildren(...previewTree(folderCheck));
+    },
+    folderNote: (folder) => (folder.done && folder.new
+      ? el('span', { class: 'tree-state new' }, `${num(folder.new)} new`)
+      : null),
+    document: (item) => [
+      el('span', { class: 'tree-name' }, item.name),
+      el('span', { class: 'tree-count' }, `${num(item.pages)} pages · ${bytes(item.bytes)}`),
+      item.error
+        ? el('span', { class: 'tree-state bad' }, 'cannot open')
+        : (item.state === 'done'
+            ? el('span', { class: 'tree-state done', title: `read by run ${item.done_in}` }, 'already read')
+            : (data.done ? el('span', { class: 'tree-state new' }, 'new') : null)),
+    ],
+  });
 }
 
 /* ------------------------------------------------------------ uploading */
@@ -149,6 +173,37 @@ async function upload(files) {
 
 /* ------------------------------------------------------- start the run */
 
+/* Everything the form holds. The preview and the run both send this, so
+   "already read" in the preview means what it will mean when the run starts —
+   the answer depends on the recipe, and a preview built from other settings
+   would be a different question answered confidently. */
+function settingsPayload() {
+  return {
+    output_dir: $('#output-dir').value.trim(),
+    work_dir: $('#work-dir').value.trim(),
+    dpi: Number($('#dpi').value),
+    lang: $('#lang').value,
+    psm: Number($('#psm').value),
+    workers: Number($('#workers').value),
+    min_confidence: Number($('#min-confidence').value),
+    force_ocr: $('#force-ocr').checked,
+    deskew: $('#deskew').checked,
+    orient: $('#orient').checked,
+    denoise: $('#denoise').checked,
+    recursive: $('#recursive').checked,
+    write_pdf: $('#write-pdf').checked,
+    write_txt: $('#write-txt').checked,
+    write_json: $('#write-json').checked,
+    write_previews: $('#write-previews').checked,
+    pdf_keeps_source_image: $('#pdf-source-image').checked,
+    txt_keeps_layout: $('#txt-layout').checked,
+    output_layout: $('#output-layout').value,
+    duplicates: $('#duplicates').value,
+    skip_already_done: $('#skip-done').checked,
+  };
+}
+
+
 function activeInput() {
   const onFolderTab = !$('#tab-folder').classList.contains('hidden');
   if (onFolderTab) return folderCheck && folderCheck.files ? folderCheck.path : null;
@@ -181,6 +236,15 @@ function refreshReadiness() {
 ['#output-dir', '#workers'].forEach((sel) => $(sel).addEventListener('input', refreshReadiness));
 $('#recursive').addEventListener('change', checkFolder);
 
+/* Which documents count as already read depends on where the results go and on
+   the recipe, so the preview is asked again when any of that changes. */
+let recheckTimer = null;
+const recheck = () => { clearTimeout(recheckTimer); recheckTimer = setTimeout(checkFolder, 400); };
+$('#output-dir').addEventListener('input', recheck);
+['#work-dir', '#dpi', '#lang', '#psm', '#force-ocr', '#deskew', '#orient', '#denoise',
+ '#write-pdf', '#write-txt', '#write-json', '#output-layout', '#skip-done',
+].forEach((sel) => { const node = $(sel); if (node) node.addEventListener('change', recheck); });
+
 $('#start').addEventListener('click', async () => {
   const button = $('#start');
   const error = $('#start-error');
@@ -189,27 +253,8 @@ $('#start').addEventListener('click', async () => {
   button.textContent = 'Starting…';
   try {
     const { url } = await postJSON('/api/runs', {
+      ...settingsPayload(),
       input_dir: activeInput(),
-      output_dir: $('#output-dir').value.trim(),
-      work_dir: $('#work-dir').value.trim(),
-      dpi: Number($('#dpi').value),
-      lang: $('#lang').value,
-      psm: Number($('#psm').value),
-      workers: Number($('#workers').value),
-      min_confidence: Number($('#min-confidence').value),
-      force_ocr: $('#force-ocr').checked,
-      deskew: $('#deskew').checked,
-      denoise: $('#denoise').checked,
-      recursive: $('#recursive').checked,
-      write_pdf: $('#write-pdf').checked,
-      write_txt: $('#write-txt').checked,
-      write_json: $('#write-json').checked,
-      write_previews: $('#write-previews').checked,
-      pdf_keeps_source_image: $('#pdf-source-image').checked,
-      txt_keeps_layout: $('#txt-layout').checked,
-      output_layout: $('#output-layout').value,
-      duplicates: $('#duplicates').value,
-      skip_already_done: $('#skip-done').checked,
     });
     window.location.href = url;
   } catch (err) {

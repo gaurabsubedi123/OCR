@@ -58,14 +58,43 @@ def test_browsing_somewhere_that_does_not_exist_falls_back(client):
 
 
 def test_the_folder_preview_counts_what_a_run_would_read(client, sample_folder: Path):
-    data = client.get(f"/api/preview-folder?path={sample_folder}").get_json()
+    data = client.post("/api/preview-folder", json={"path": str(sample_folder)}).get_json()
     assert data["files"] == 2
     assert data["pages"] == 3
-    assert len(data["sample"]) == 2
+
+
+def test_the_folder_preview_returns_the_folder_tree(client, sample_folder: Path):
+    """The shape of the folder is what a case file is organised by.
+
+    sample_folder holds scan.pdf at the top and sub/page.png one down, so a
+    correct tree has one document at the root and one folder carrying the
+    other — not two paths in a list.
+    """
+    tree = client.post("/api/preview-folder", json={"path": str(sample_folder)}).get_json()["tree"]
+    assert [d["name"] for d in tree["documents"]] == ["scan.pdf"]
+    assert [f["name"] for f in tree["folders"]] == ["sub"]
+
+    sub = tree["folders"][0]
+    assert sub["files"] == 1 and sub["pages"] == 1
+    assert [d["name"] for d in sub["documents"]] == ["page.png"]
+    # The root's counts include everything beneath it, not just its own files.
+    assert tree["files"] == 2 and tree["pages"] == 3
+
+
+def test_the_preview_says_which_documents_are_new(client, sample_folder: Path, tmp_path: Path):
+    """Adding one file to a read folder has to show that one file."""
+    output = tmp_path / "out"
+    body = {"path": str(sample_folder), "output_dir": str(output)}
+
+    first = client.post("/api/preview-folder", json=body).get_json()
+    assert first["new"] == 2 and first["done"] == 0
+    assert all(d["state"] == "new" for d in first["tree"]["documents"])
 
 
 def test_the_folder_preview_rejects_a_file(client, sample_folder: Path):
-    response = client.get(f"/api/preview-folder?path={sample_folder / 'scan.pdf'}")
+    response = client.post(
+        "/api/preview-folder", json={"path": str(sample_folder / "scan.pdf")}
+    )
     assert response.status_code == 400
 
 
@@ -257,3 +286,29 @@ def test_the_input_folder_may_not_sit_inside_the_work_folder(client, sample_fold
     )
     assert response.status_code == 400
     assert "work folder" in response.get_json()["error"]
+
+
+@needs_tesseract
+def test_the_preview_marks_what_has_already_been_read(client, sample_folder: Path, tmp_path: Path):
+    """Read the folder, add a file, and the preview names the one new file."""
+    output = tmp_path / "out"
+    body = {"path": str(sample_folder), "output_dir": str(output)}
+
+    started = client.post(
+        "/api/runs", json={"input_dir": str(sample_folder), "output_dir": str(output)}
+    ).get_json()
+    run = registry.get(started["run_id"])
+    run.join(timeout=180)
+
+    after = client.post("/api/preview-folder", json=body).get_json()
+    assert after["done"] == 2 and after["new"] == 0
+    assert all(d["state"] == "done" for d in after["tree"]["documents"])
+    assert after["tree"]["documents"][0]["done_in"] == started["run_id"]
+
+    from conftest import text_page
+
+    text_page(["A DOCUMENT ADDED LATER"]).save(sample_folder / "3. added.png")
+    later = client.post("/api/preview-folder", json=body).get_json()
+    assert later["new"] == 1 and later["done"] == 2
+    added = [d for d in later["tree"]["documents"] if d["name"] == "3. added.png"]
+    assert added and added[0]["state"] == "new"

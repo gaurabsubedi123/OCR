@@ -64,38 +64,74 @@ function renderBar(run) {
   $('#inflight').replaceChildren(...inflight.map((label) => el('span', {}, label)));
 }
 
-function fileRow(summary, index) {
-  const seen = pagesSeen.get(index) || summary.pages_done || 0;
+/* The documents, as the folder tree they came from rather than a flat list of
+   paths. Redrawn on every finished page, which is affordable because a closed
+   folder draws one row however much is inside it. */
+
+const openFolders = makeTreeState();
+
+function fileLine(item) {
+  const summary = item.summary;
+  const index = item.index;
+  // Whichever is further along: what this tab has watched arrive, or what the
+  // server says. A tab opened part-way through a run has watched nothing, and
+  // one that went to a document and came back has watched only what happened
+  // since — which is why the server keeps this count too.
+  const seen = Math.max(pagesSeen.get(index) || 0, summary.pages_done || 0);
   const flagged = (summary.flagged_pages || []).length;
   const outputs = Object.entries(summary.outputs || {});
-  return el('tr', { class: 'clickable', onclick: () => { window.location.href = `/runs/${runId}/documents/${index}`; } },
-    el('td', { class: 'path' }, summary.relpath,
+  const total = summary.page_count || 0;
+  const running = summary.status === 'running';
+
+  return [
+    el('span', {
+      class: 'tree-name clickable',
+      onclick: () => { window.location.href = `/runs/${runId}/documents/${index}`; },
+    }, item.name,
       summary.error ? el('div', { class: 'dim', style: 'color:var(--bad)' }, summary.error) : null),
-    el('td', {}, statusPill(summary.status)),
-    el('td', { class: 'num' }, summary.status === 'skipped'
-      ? el('span', { class: 'dim', title: `read by run ${summary.skipped_from_run}` }, num(summary.page_count))
-      : `${num(seen)}/${num(summary.page_count)}`),
-    el('td', { class: 'num' }, flagged ? el('span', { class: 'pill warn' }, num(flagged)) : el('span', { class: 'dim' }, '—')),
-    el('td', { class: 'num' }, summary.mean_confidence === null || summary.mean_confidence === undefined
-      ? el('span', { class: 'dim' }, '—')
-      : `${summary.mean_confidence.toFixed(0)}`),
-    el('td', {}, outputs.length
-      ? outputs.map(([kind, rel]) => el('a', {
+    statusPill(summary.status),
+    el('span', { class: 'tree-count' }, summary.status === 'skipped'
+      ? el('span', { title: `read by run ${summary.skipped_from_run}` }, `${num(total)} pages`)
+      : `${num(seen)}/${num(total)} pages`),
+    running && total
+      ? el('span', { class: 'mini-bar' }, el('i', { style: `width:${Math.min(100, (seen / total) * 100)}%` }))
+      : null,
+    flagged ? el('span', { class: 'pill warn' }, `${num(flagged)} flagged`) : null,
+    summary.mean_confidence === null || summary.mean_confidence === undefined
+      ? null
+      : el('span', { class: 'tree-count' }, `conf ${summary.mean_confidence.toFixed(0)}`),
+    outputs.length
+      ? el('span', { class: 'tree-outputs' }, ...outputs.map(([kind, rel]) => el('a', {
           href: `/files/${runId}/${encodeURI(rel)}${kind === 'pdf' ? '' : '?download=1'}`,
-          target: '_blank', class: 'mono', style: 'margin-right:8px',
+          target: '_blank', class: 'mono',
           onclick: (e) => e.stopPropagation(),
-        }, kind))
-      : el('span', { class: 'dim' }, '—')));
+        }, kind)))
+      : null,
+  ];
+}
+
+function isReading(folder) {
+  return folder.documents.some((d) => d.summary.status === 'running')
+    || folder.folders.some(isReading);
 }
 
 function renderFiles() {
-  const body = $('#files');
-  const rows = [];
-  const sorted = Array.from(files.entries()).sort((a, b) => a[0] - b[0]);
-  for (const [index, summary] of sorted) rows.push(fileRow(summary, index));
-  body.replaceChildren(...rows);
-  const done = sorted.filter(([, s]) => s.status === 'done').length;
-  $('#files-hint').textContent = `${num(done)} of ${num(sorted.length)} written`;
+  const entries = Array.from(files.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([index, summary]) => ({
+      path: summary.relpath, pages: summary.page_count || 0, index, summary,
+    }));
+  const tree = buildTree(entries);
+  $('#files').replaceChildren(...renderTree(tree, {
+    open: openFolders,
+    onToggle: renderFiles,
+    // A closed folder still has to say something is happening inside it,
+    // however deep down, or a collapsed tree looks idle during a long run.
+    folderNote: (folder) => (isReading(folder) ? el('span', { class: 'pill live' }, 'reading') : null),
+    document: fileLine,
+  }));
+  const done = entries.filter((e) => ['done', 'copied', 'skipped'].includes(e.summary.status)).length;
+  $('#files-hint').textContent = `${num(done)} of ${num(entries.length)} written`;
 }
 
 const logLines = [];
@@ -124,7 +160,9 @@ function applySnapshot(run) {
   if (run.files) {
     run.files.forEach((summary, index) => {
       files.set(index, summary);
-      if (summary.pages_done) pagesSeen.set(index, summary.pages_done);
+      if (summary.pages_done) {
+        pagesSeen.set(index, Math.max(pagesSeen.get(index) || 0, summary.pages_done));
+      }
     });
     renderFiles();
   }
