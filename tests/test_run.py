@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import pypdfium2 as pdfium
+from PIL import Image
 import pytest
 from conftest import colour_page, is_greyscale, needs_tesseract, text_page
 
@@ -867,3 +868,38 @@ def test_the_report_says_which_pages_had_to_be_turned(sample_folder: Path, tmp_p
     rows = list(csv.DictReader((Path(run.run_dir) / "pages.csv").open()))
     turned = {r["file"]: r["rotated"] for r in rows if r["rotated"]}
     assert turned == {"inverted.png": "180"}
+
+
+@needs_tesseract
+@pytest.mark.parametrize("laid", [20, 40])
+def test_a_page_well_off_square_is_still_read_in_full(tmp_path: Path, laid: int):
+    """The quiet half of the rotation problem.
+
+    A page 20 degrees off square used to correct by the old 15-degree cap,
+    recover 308 characters of 2,205, and report 85% confidence — above the
+    review threshold, so nothing was flagged. Losing seven eighths of a page
+    while looking healthy is the same failure an inverted page causes, and it
+    needs the same answer: read the whole page or say you could not.
+    """
+    page = tmp_path / "askew.png"
+    text_page().rotate(-laid, resample=Image.BICUBIC, expand=True, fillcolor="white").save(page)
+
+    result = process_page(_one_page(page), Settings(input_dir=".", output_dir=".", orient=True))
+
+    assert "INCIDENT REPORT" in result.text
+    assert "Reporting officer" in result.text
+    assert not result.needs_review
+
+
+@needs_tesseract
+def test_a_page_both_turned_and_off_square_is_recovered(tmp_path: Path):
+    """The two corrections have to compose: a quarter turn plus real skew."""
+    page = tmp_path / "both.png"
+    turn(text_page(), 180).rotate(
+        -12, resample=Image.BICUBIC, expand=True, fillcolor="white"
+    ).save(page)
+
+    result = process_page(_one_page(page), Settings(input_dir=".", output_dir=".", orient=True))
+
+    assert result.rotation_applied == 180
+    assert "INCIDENT REPORT" in result.text

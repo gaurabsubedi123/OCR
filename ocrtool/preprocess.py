@@ -6,7 +6,8 @@ three. Deskewing alone routinely moves a page from unusable to readable.
 
 The correction is deliberately conservative: it fixes scanner skew, and it
 refuses to guess at anything larger, because a page that is 90 degrees out is
-a rotated page, not a skewed one, and this method cannot tell the difference.
+a rotated page, not a skewed one, and the projection profile cannot tell the
+difference on its own.
 Quarter turns are a separate question with a separate answer — see `turn` here
 and `_read_turned` in pipeline.py.
 """
@@ -18,7 +19,24 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps
 
-MAX_SKEW_DEGREES = 6.0
+# How far off square a page can be and still be called skew rather than a
+# rotation. Measured on real pages: the projection profile recovers a known
+# angle exactly at every cap tried, and on ten straight pages from a real claim
+# file it returned 0.0 at caps of 6, 15, 25 and 45 alike — so widening it does
+# not invent skew on pages that have none. 15 costs about 100ms a page over 6,
+# and 45 would cost about half a second, which is not worth paying on every
+# page for an angle a scanner does not produce.
+MAX_SKEW_DEGREES = 15.0
+# Where the search goes for a page that saturated the cap above. A page laid at
+# 20 degrees used to correct by 15, read 308 characters of 2,205, and report 85%
+# confidence with nothing flagged — a silent loss of seven eighths of the page,
+# which is the same failure an upside-down page causes and just as quiet. Only
+# a page whose first estimate lands *on* the cap pays for this, so it costs
+# nothing on a folder of ordinary scans.
+#
+# 45 is the end of the line rather than an arbitrary stop: past it a quarter
+# turn is the shorter way round, and pipeline.py tries those.
+WIDE_SKEW_DEGREES = 45.0
 COARSE_STEP = 1.0
 FINE_STEP = 0.2
 # Below a quarter degree the rotation costs a resample and buys nothing.
@@ -143,8 +161,22 @@ def _estimate_skew(gray: Image.Image) -> float:
         # the ink is smeared evenly across every row.
         return float(np.var(profile))
 
-    coarse = np.arange(-MAX_SKEW_DEGREES, MAX_SKEW_DEGREES + COARSE_STEP, COARSE_STEP)
-    best = max(coarse, key=score)
-    fine = np.arange(best - COARSE_STEP, best + COARSE_STEP + FINE_STEP, FINE_STEP)
-    best = max(fine, key=score)
-    return float(best) if abs(best) <= MAX_SKEW_DEGREES else 0.0
+    def search(cap: float) -> float:
+        coarse = np.arange(-cap, cap + COARSE_STEP, COARSE_STEP)
+        best = max(coarse, key=score)
+        fine = np.arange(best - COARSE_STEP, best + COARSE_STEP + FINE_STEP, FINE_STEP)
+        return float(max(fine, key=score))
+
+    best = search(MAX_SKEW_DEGREES)
+    # Landing on the cap means the true angle is at it or past it, and the
+    # search was cut off rather than finished. That is the one case worth
+    # paying for a wider look.
+    if abs(best) >= MAX_SKEW_DEGREES - FINE_STEP:
+        best = search(WIDE_SKEW_DEGREES)
+    # The fine pass searches a degree either side of the coarse winner, so it
+    # can land just outside the cap. Clamping is the only sane answer: this
+    # used to return 0.0 there, which says "the page is straight" — the one
+    # thing already known to be false. A page laid at 6 degrees came back
+    # uncorrected and read 559 characters of 2,205, at 85% confidence, so
+    # nothing flagged it either. Silent, and a quarter of the page.
+    return float(np.clip(best, -WIDE_SKEW_DEGREES, WIDE_SKEW_DEGREES))

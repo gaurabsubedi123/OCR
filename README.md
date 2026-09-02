@@ -376,7 +376,7 @@ folder is the record, and the UI reads it back.
 | Pages at once | `--workers` | cores − 2, max 8 | How many pages are read in parallel. |
 | Flag pages below | `--min-confidence` | 70 | Pages under this average word confidence are flagged for review. |
 | OCR every page | `--force-ocr` | off | Ignore text layers PDFs already carry. |
-| Straighten skewed scans | `--no-deskew` to disable | on | Corrects scanner skew up to 6°. |
+| Straighten skewed scans | `--no-deskew` to disable | on | Corrects skew up to 15°, and out to 45° on a page that needs it. |
 | Stand up sideways pages | `--no-orient` to disable | on | A page that reads badly is tried at the other three angles and the best reading kept. Only badly-read pages cost anything. |
 | Remove scanner speckle | `--no-denoise` to disable | on | A 3×3 median filter. |
 | Include subfolders | `--no-recursive` to disable | on | |
@@ -513,9 +513,19 @@ no loss of quality.
 
 **Pages are cleaned before OCR.** Grayscale, a median filter for speckle, a
 light-end contrast stretch, and a projection-profile deskew that tries angles
-between ±6° and keeps the one where text lines sit squarest. Anything past 6° is
-a rotated page rather than a skewed one, and this method cannot tell those apart,
-so it declines to guess. Quarter turns are handled separately, below.
+and keeps the one where text lines sit squarest. It searches ±15° on every page,
+and if the answer lands on that limit — meaning the page is at least that far
+off square — it looks again out to ±45°. Only a page that saturates the first
+search pays for the second, so a folder of ordinary scans never does.
+
+The narrow range this replaced hid a quiet failure. A page laid 20° off square
+corrected by as much as the cap allowed, recovered 308 characters of 2,205, and
+reported **85% confidence** — above the review threshold, so nothing was
+flagged. Seven eighths of the page, gone silently. Widening it is safe because
+the estimate does not invent skew: on ten real pages from a claim file it
+returned 0.0 at caps of 6, 15, 25 and 45 alike.
+
+Past 45° a quarter turn is the shorter way round, and those are handled next.
 
 **A page that reads badly is tried the other way up.** Scanned exhibits arrive
 sideways and upside down, and an inverted page does not fail loudly — measured
@@ -534,6 +544,11 @@ better than it did before, so a wrong guess costs a second and changes nothing.
 
 A page a quarter turn *clockwise* never gets this far: tesseract stands that one
 up by itself, at full confidence. It is the other three angles that need help.
+
+Together with the deskew above this covers the whole circle, because any angle
+is a quarter turn plus at most 45°. Measured on one page laid at seventeen
+angles from 0° to 275°, every one came back with the full text — 100% to 102% of
+the characters the upright page gives, at 89-94% confidence.
 
 Only badly-read pages pay for this, and a page that comes back empty at two
 different angles is abandoned rather than tried at all four — a photograph has

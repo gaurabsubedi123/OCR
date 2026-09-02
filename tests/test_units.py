@@ -30,7 +30,13 @@ from ocrtool.outputs import (
     write_text,
 )
 from ocrtool.pipeline import _flag, _improves_on, _reads_badly
-from ocrtool.preprocess import _estimate_skew, preprocess, turn
+from ocrtool.preprocess import (
+    MAX_SKEW_DEGREES,
+    WIDE_SKEW_DEGREES,
+    _estimate_skew,
+    preprocess,
+    turn,
+)
 from ocrtool.render import _fit, render_page
 from ocrtool.tesseract import parse_osd, parse_tsv
 from ocrtool.pdfpage import replace_page_image
@@ -247,6 +253,52 @@ def test_preprocess_straightens_a_skewed_page():
 
 def test_a_straight_page_is_left_alone():
     assert preprocess(text_page()).skew_corrected == 0.0
+
+
+def _laid_at(degrees: float) -> Image.Image:
+    """A page put down at `degrees` clockwise, the whole page kept."""
+    return ImageOps.grayscale(
+        text_page().rotate(-degrees, resample=Image.BICUBIC, expand=True, fillcolor="white")
+    )
+
+
+@pytest.mark.parametrize("degrees", [3, 6, 10, 15])
+def test_skew_is_measured_across_the_whole_ordinary_range(degrees: int):
+    """Up to the cap the estimate has to be right, not merely close.
+
+    6 is here for a reason: it was the old cap, and a page laid exactly there
+    came back as 0.0 — "this page is straight", the one thing known to be
+    false. The fine pass searches a degree past the coarse winner, landed
+    outside the cap, and the result was thrown away rather than clamped.
+    """
+    assert _estimate_skew(_laid_at(degrees)) == pytest.approx(degrees, abs=0.5)
+
+
+@pytest.mark.parametrize("degrees", [20, 30, 45])
+def test_a_page_well_past_the_cap_is_still_measured(degrees: int):
+    """Saturating the first search buys a wider one, out to a quarter turn."""
+    assert _estimate_skew(_laid_at(degrees)) == pytest.approx(degrees, abs=1.0)
+
+
+def test_the_estimate_never_exceeds_a_quarter_turn():
+    """Past 45 a quarter turn is the shorter way round and pipeline.py has it."""
+    for degrees in (0, 5, 20, 44, 45):
+        assert abs(_estimate_skew(_laid_at(degrees))) <= WIDE_SKEW_DEGREES
+
+
+def test_the_wide_search_does_not_invent_skew_on_a_straight_page():
+    """The risk of searching further is correcting a page that was already fine.
+
+    Measured on ten real pages from a claim file, the estimate stayed at 0.0 at
+    every cap tried — 6, 15, 25 and 45 alike — which is what made widening it
+    safe to do.
+    """
+    assert _estimate_skew(_laid_at(0)) == pytest.approx(0.0, abs=0.3)
+    assert preprocess(text_page()).skew_corrected == 0.0
+
+
+def test_the_wide_search_starts_where_the_ordinary_one_stops():
+    assert WIDE_SKEW_DEGREES > MAX_SKEW_DEGREES
 
 
 def test_skew_estimate_survives_a_blank_page():
