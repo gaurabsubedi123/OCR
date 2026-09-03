@@ -903,6 +903,10 @@ def list_runs(work_dir: Path) -> list[dict[str, Any]]:
     return runs
 
 
+# How long to keep listening for a run's closing events after it has marked
+# itself finished. Only reached if `done` never arrives, which would be a bug.
+FINAL_EVENT_GRACE_SECONDS = 10.0
+
 # How long a cancelled run is given to finish the pages already in flight
 # before the CLI reports what it has. A page is at most a couple of seconds.
 CANCEL_GRACE_SECONDS = 120
@@ -952,11 +956,32 @@ def run_blocking(settings: Settings, *, on_event: Callable[[dict[str, Any]], Non
 
 
 def _drain(run: Run, q: queue.Queue) -> Iterator[dict[str, Any]]:
+    """Every event the run publishes, ending with `done`.
+
+    The subtlety is that `finished_at` is set at the top of `_finish`, but
+    `done` is published at the bottom of it — after the run has written
+    pages.csv and the manifest, which on a Windows drive is not instant. So an
+    empty queue while `finished_at` is set does not mean there is nothing left
+    to come, and treating it that way dropped the final events: the CLI missed
+    `done`, left its progress line hanging above the summary, and swallowed the
+    closing note. It showed up as a test that failed only when the machine was
+    busy, which is the kind that gets rerun rather than read.
+
+    So the end of the run starts a short grace period rather than ending the
+    drain. `done` closes it immediately; the deadline only matters if that
+    event never arrives at all.
+    """
+    settled_by: float | None = None
     while True:
         try:
             event = q.get(timeout=0.25)
         except queue.Empty:
-            if run.finished_at is not None:
+            if run.finished_at is None:
+                continue
+            now = time.monotonic()
+            if settled_by is None:
+                settled_by = now + FINAL_EVENT_GRACE_SECONDS
+            elif now >= settled_by:
                 return
             continue
         yield event

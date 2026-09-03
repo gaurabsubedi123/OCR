@@ -14,9 +14,9 @@ import time
 from pathlib import Path
 
 import pypdfium2 as pdfium
-from PIL import Image
+from PIL import Image, ImageDraw
 import pytest
-from conftest import colour_page, is_greyscale, needs_tesseract, text_page
+from conftest import _font, colour_page, is_greyscale, needs_tesseract, text_page
 
 from ocrtool.preprocess import turn
 
@@ -267,7 +267,13 @@ def test_events_report_progress_as_counts(sample_folder: Path, tmp_path: Path):
     run_blocking(_settings(sample_folder, tmp_path), on_event=events.append)
 
     kinds = [event["type"] for event in events]
-    assert "discovered" in kinds and "page" in kinds and "done" in kinds
+    # `done` is the one worth naming: a run marks itself finished before it
+    # writes pages.csv and the manifest, so a drain that stopped at the first
+    # quiet moment lost the closing events whenever the machine was busy.
+    assert "discovered" in kinds, kinds
+    assert "page" in kinds, kinds
+    assert "done" in kinds, kinds
+    assert kinds[-1] == "done", f"the run must end on its own done event: {kinds[-5:]}"
 
     progress = [event["run"]["totals"] for event in events if event["type"] == "progress"]
     assert progress, "a run must publish progress while it works"
@@ -938,3 +944,52 @@ def test_a_second_ctrl_c_does_not_escape_either(long_document: Path, tmp_path: P
 
     run = run_blocking(_settings(long_document, tmp_path, workers=1), on_event=on_event)
     assert run.status in {"cancelled", "done"}
+
+
+@needs_tesseract
+def test_a_pdf_read_from_its_text_layer_keeps_the_page_shape(tmp_path: Path):
+    """The .txt of a born-digital PDF used to come out flat.
+
+    A scanned page kept its columns, because OCR reports where every word sat;
+    a page taken from a PDF's own text layer was a bare string, so the same
+    document came out in two different shapes depending on something the reader
+    cannot see. Measured on a real claim file, a memo header went from labels
+    and values run together on one line to two aligned columns.
+
+    Proved the cheap way: OCR a two-column page, then feed the searchable PDF
+    back in so the second run reads it as born-digital.
+    """
+    page = Image.new("RGB", (1700, 1100), "white")
+    draw = ImageDraw.Draw(page)
+    font = _font()
+    rows = [
+        ("Company:", "MERIDIAN CASUALTY COMPANY"),
+        ("Date:", "April 9, 2025"),
+        ("From:", "R OKONKWO, REGION IV"),
+        ("To:", "HALE AND BARNES LLP"),
+        ("Claim:", "A-00-123456-C CLAIM 0000"),
+        ("Subject:", "REQUEST FOR RECORDS"),
+    ]
+    for row, (left, right) in enumerate(rows):
+        draw.text((120, 150 + row * 90), left, fill="black", font=font)
+        draw.text((900, 150 + row * 90), right, fill="black", font=font)
+
+    first_in = tmp_path / "in"
+    first_in.mkdir()
+    page.save(first_in / "memo.png")
+    run_blocking(Settings(input_dir=str(first_in), output_dir=str(tmp_path / "o1"), dpi=150, workers=2))
+
+    second_in = tmp_path / "in2"
+    second_in.mkdir()
+    (second_in / "memo.pdf").write_bytes((tmp_path / "o1" / "pdf" / "memo.pdf").read_bytes())
+    second = run_blocking(
+        Settings(input_dir=str(second_in), output_dir=str(tmp_path / "o2"), dpi=150, workers=2)
+    )
+    assert second.totals.pages_text_layer >= 1, "the second run must use the text layer"
+
+    text = (tmp_path / "o2" / "txt" / "memo.txt").read_text()
+    rows = [line for line in text.splitlines() if "April" in line]
+    assert rows, f"the right-hand column is missing entirely:\n{text}"
+    # Both columns on one line, with the gap between them still there.
+    assert "Date:" in rows[0]
+    assert rows[0].index("April") - rows[0].index("Date:") > 20, rows[0]
