@@ -312,3 +312,35 @@ def test_the_preview_marks_what_has_already_been_read(client, sample_folder: Pat
     assert later["new"] == 1 and later["done"] == 2
     added = [d for d in later["tree"]["documents"] if d["name"] == "3. added.png"]
     assert added and added[0]["state"] == "new"
+
+
+def test_a_run_whose_process_died_is_not_reported_as_still_running():
+    """A manifest is written as the run goes, so one that was killed part-way
+    is left saying `running` for ever.
+
+    Read back by a process that is not executing it, that is not a claim that
+    can be true — and the browser showed a progress bar that never moved and a
+    Stop button that could not do anything. Seen for real: a server killed
+    mid-run left the run listed as running in every later session.
+    """
+    from ocrtool.web.state import Registry
+
+    registry = Registry()
+    for stuck in ("running", "discovering", "pending"):
+        seen = registry.as_read_from_disk({"run_id": "x", "status": stuck})
+        assert seen["status"] == "interrupted"
+        assert seen["live"] is False
+
+    # A run that reached an end of its own keeps the end it reached.
+    for settled in ("done", "failed", "cancelled"):
+        assert registry.as_read_from_disk({"status": settled})["status"] == settled
+
+
+def test_reading_a_dead_run_back_does_not_alter_what_is_on_disk():
+    """The manifest is the record of what happened; only the reading changes."""
+    from ocrtool.web.state import Registry
+
+    manifest = {"run_id": "x", "status": "running", "totals": {"pages_done": 7}}
+    seen = Registry().as_read_from_disk(manifest)
+    assert manifest["status"] == "running", "the caller's dict was mutated"
+    assert seen["totals"]["pages_done"] == 7

@@ -41,7 +41,7 @@ from ocrtool.render import _fit, render_page
 from ocrtool.tesseract import parse_osd, parse_tsv
 from ocrtool.pdfpage import replace_page_image
 from ocrtool.preprocess import apply_geometry
-from ocrtool.textlayer import _tidy, read_text_layer
+from ocrtool.textlayer import _tidy, _words_from, read_text_layer
 
 from conftest import colour_page, text_page
 
@@ -857,3 +857,65 @@ def test_a_document_reports_its_progress_before_it_has_finished():
     # Once collected, the pages themselves are the better answer.
     result.pages = [PageResult(page_no=n, source="ocr", text="x") for n in range(1, 13)]
     assert result.summary()["pages_done"] == 12
+
+
+# --------------------------------------------- positions from a text layer
+
+
+class _FakeTextPage:
+    """Stands in for PDFium's text page: a box per character, PDF coordinates."""
+
+    def __init__(self, text, boxes, count=None):
+        self.text, self.boxes = text, boxes
+        self._count = len(text) if count is None else count
+
+    def count_chars(self):
+        return self._count
+
+    def get_charbox(self, index):
+        return self.boxes[index]
+
+
+def test_words_are_cut_at_whitespace_and_take_the_box_around_them():
+    # Two characters side by side, a space, then two more.
+    boxes = [(10, 700, 16, 710), (16, 698, 22, 710), (22, 700, 25, 700),
+             (30, 700, 36, 712), (36, 700, 42, 710)]
+    words = _words_from(_FakeTextPage("ab cd", boxes), "ab cd", page_height=792)
+    assert [w.text for w in words] == ["ab", "cd"]
+    # The box is the union of its characters', not the first one's.
+    assert (words[0].x0, words[0].x1) == (10, 22)
+    assert (words[1].x0, words[1].x1) == (30, 42)
+
+
+def test_text_layer_boxes_are_flipped_to_read_down_the_page():
+    """PDF coordinates count up from the bottom; everything else counts down.
+
+    Getting this backwards does not crash — it silently prints the page upside
+    down, because `laid_out_text` orders lines by their vertical centre.
+    """
+    boxes = [(10, 700, 16, 710)]  # near the top of a 792pt page
+    top_word = _words_from(_FakeTextPage("a", boxes), "a", page_height=792)[0]
+    assert top_word.y0 == 792 - 710
+    assert top_word.y1 == 792 - 700
+    assert top_word.y0 < top_word.y1, "y must grow downwards"
+
+    lower = _words_from(_FakeTextPage("a", [(10, 100, 16, 110)]), "a", page_height=792)[0]
+    assert lower.y0 > top_word.y0, "a word further down the page must sort later"
+
+
+def test_text_layer_words_are_certain():
+    """They are what the PDF says, not a reading of a picture of it."""
+    words = _words_from(_FakeTextPage("a", [(10, 700, 16, 710)]), "a", page_height=792)
+    assert words[0].confidence == 100.0
+
+
+def test_no_boxes_at_all_beats_boxes_that_do_not_line_up():
+    """The box for index i is only the box for character i if the counts agree."""
+    page = _FakeTextPage("abc", [(0, 0, 1, 1)] * 3, count=5)
+    assert _words_from(page, "abc", page_height=792) == []
+    assert _words_from(_FakeTextPage("", []), "", page_height=792) == []
+
+
+def test_an_image_has_no_text_layer_words(tmp_path: Path):
+    text_page().save(tmp_path / "page.png")
+    assert read_text_layer(tmp_path / "page.png", 1).words == []

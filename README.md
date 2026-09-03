@@ -71,7 +71,7 @@ ocr-input/                              ocr-output/
 | File | What it is |
 | --- | --- |
 | `…/pdf/name.pdf` | The same pages, now with selectable, searchable text behind the page image — open it in any PDF reader and Ctrl-F works. The page still looks like your original, in colour; pages that already had a text layer are copied through untouched. |
-| `…/txt/name.txt` | The text, laid out the way the page was — columns, tables and forms stay lined up — with a `----- page 3 (ocr) -----` marker before each page saying where that page's text came from. |
+| `…/txt/name.txt` | The text, laid out the way the page was — columns, tables and forms stay lined up, whether the page was OCR'd or taken from a PDF's own text layer — with a `----- page 3 (ocr) -----` marker before each page saying where that page's text came from. |
 | `…/json/name.json` | Per page: the text, tesseract's confidence, whether it was flagged, and every word with its position on the page image. |
 
 **The name is your name.** Only the extension changes, so
@@ -569,6 +569,24 @@ when its text layer holds at least 100 letters and digits — not merely *some*
 text, because scanned PDFs often carry a stray Bates stamp or fax header. On a
 real 2,063-page case file this took nearly half the pages off the OCR queue with
 no loss of quality.
+
+Its layout is kept too. PDFium reports a box for every character, so a page
+taken from a text layer is laid out from its own positions the same way an
+OCR'd page is laid out from tesseract's — and more precisely, since these are
+what the PDF says rather than something measured off a picture. This used to be
+the one place the `.txt` came out flat: a scanned page kept its columns while a
+born-digital one beside it did not, so the same document had two different
+shapes depending on something you cannot see by looking at it. On a real claim
+file it is the difference between
+
+```
+Company: Meridian Casualty              Company:     Meridian  Casualty
+Date: April 9, 2025                     Date:        April 9, 2025
+From: R. Okonkwo                        From:        R. Okonkwo
+555-0142                                             555-0142
+```
+
+— on the right you can see that the phone number belongs to the `From:` row.
 
 **Pages are cleaned before OCR.** Grayscale, a median filter for speckle, a
 light-end contrast stretch, and a projection-profile deskew that tries angles

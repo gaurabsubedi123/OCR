@@ -71,6 +71,7 @@ def _process(work: PageWork, settings: Settings, started: float) -> PageResult:
                 source="text-layer",
                 text=layer.text,
                 confidence=None,  # exact text has no confidence to report
+                words=layer.words,
                 duration_ms=_ms_since(started),
                 preview=preview_rel,
             )

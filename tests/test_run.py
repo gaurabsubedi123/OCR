@@ -957,7 +957,8 @@ def test_a_pdf_read_from_its_text_layer_keeps_the_page_shape(tmp_path: Path):
     and values run together on one line to two aligned columns.
 
     Proved the cheap way: OCR a two-column page, then feed the searchable PDF
-    back in so the second run reads it as born-digital.
+    back in so the second run reads it as born-digital. The names on the page
+    are invented; nothing in this repository comes from a real matter.
     """
     page = Image.new("RGB", (1700, 1100), "white")
     draw = ImageDraw.Draw(page)
