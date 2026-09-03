@@ -414,7 +414,9 @@ def api_run(run_id: str) -> Any:
     manifest = load_run(work_dir, run_id) if work_dir else None
     if manifest is None:
         abort(404)
-    return jsonify(manifest)
+    # Not in this process's registry, so whatever the manifest says, nothing is
+    # executing it — see Registry.as_read_from_disk.
+    return jsonify(registry.as_read_from_disk(manifest))
 
 
 @bp.post("/api/runs/<run_id>/cancel")

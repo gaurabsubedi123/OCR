@@ -24,6 +24,11 @@ from ..runner import Run, list_runs, load_run
 
 RECENT_LIMIT = 40
 
+# What a run's manifest says while it is still going. Read back from disk by a
+# process that is not executing that run, any of these means the run did not
+# get to finish — see `_as_read_from_disk`.
+UNFINISHED = {"running", "discovering", "pending"}
+
 
 class Registry:
     def __init__(self) -> None:
@@ -100,12 +105,15 @@ class Registry:
             manifest = load_run(work_dir, run_id) if work_dir.is_dir() else None
             if manifest is None:
                 continue
-            manifest["live"] = False
-            out.append(manifest)
+            out.append(_as_read_from_disk(manifest))
             seen.add(run_id)
             if len(out) >= limit:
                 break
         return out[:limit]
+
+    def as_read_from_disk(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        """Public wrapper, so the run page tells the same story as the list."""
+        return _as_read_from_disk(manifest)
 
     def find_output_dir(self, run_id: str) -> Path | None:
         """Which output folder a run wrote its results into — the live run
@@ -134,3 +142,23 @@ class Registry:
 
     def runs_in(self, work_dir: Path) -> list[dict[str, Any]]:
         return list_runs(work_dir)
+
+
+def _as_read_from_disk(manifest: dict[str, Any]) -> dict[str, Any]:
+    """A finished run's record, with a status that can actually be true.
+
+    A run's manifest is written as it goes, so one whose process ended without
+    finishing — a closed terminal, a killed server, a machine that lost power —
+    is left saying `running` for ever. Any later process reading it then reports
+    a run that nothing is executing as still going, with a progress bar that
+    never moves and a Stop button that cannot do anything.
+
+    This is read by a process that is not running it, so `running` here is not
+    a claim that can be true. It is called `interrupted` instead, which is both
+    honest and useful: the pages that were read are on disk, and starting the
+    same run again picks them up.
+    """
+    manifest = {**manifest, "live": False}
+    if manifest.get("status") in UNFINISHED:
+        manifest["status"] = "interrupted"
+    return manifest

@@ -63,6 +63,8 @@ async function postJSON(url, body) {
 const STATUS_CLASS = {
   done: 'good', running: 'live', discovering: 'live', pending: '',
   skipped: '', copied: 'good', failed: 'bad', cancelled: 'warn',
+  // A run whose process ended without finishing. Its pages are still on disk.
+  interrupted: 'warn',
 };
 
 function statusPill(status, extra = '') {
